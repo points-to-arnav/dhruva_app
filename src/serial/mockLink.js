@@ -1,21 +1,21 @@
-import type { LinkEvent, SerialLink } from './types';
-
 const DONGLE_ID = '2001';
 const NEXT_HOP = '0x0011';
 
 // Pretends to be the dongle firmware: answers INFO? and walks each SEND
 // through the v2 message states. With no infra node heard, a message sits
-// in WAITING until one shows up (demo script steps 2-3).
-export class MockLink implements SerialLink {
-  private listeners = new Set<(event: LinkEvent) => void>();
-  private timers: ReturnType<typeof setTimeout>[] = [];
-  private connected = false;
-  private battery = 78;
-  private nodes = 2;
-  private counter = 41;
-  private waiting: string[] = [];
+// in WAITING until one shows up (demo script steps 2-3). Open the app with
+// ?mock to use it.
+export class MockLink {
+  supported = true;
+  unsupportedReason = null;
+  listeners = new Set();
+  timers = [];
+  connected = false;
+  nodes = 2;
+  counter = 41;
+  waiting = [];
 
-  readonly mock = {
+  mock = {
     toggleConnection: () => this.setConnected(!this.connected),
     toggleNodes: () => {
       this.nodes = this.nodes > 0 ? 0 : 2;
@@ -33,14 +33,16 @@ export class MockLink implements SerialLink {
     this.timers = [];
   }
 
-  subscribe(listener: (event: LinkEvent) => void) {
+  subscribe(listener) {
     this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
+    return () => this.listeners.delete(listener);
   }
 
-  async writeLine(line: string) {
+  async connect() {
+    this.setConnected(true);
+  }
+
+  async writeLine(line) {
     if (!this.connected) throw new Error('Dongle not connected');
     if (line === 'INFO?') {
       this.later(50, () => this.sendInfo());
@@ -53,41 +55,38 @@ export class MockLink implements SerialLink {
     this.later(500, () => {
       this.status(id, 'STORED');
       if (this.nodes > 0) this.transmit(id);
-      else this.later(800, () => {
-        this.status(id, 'WAITING');
-        this.waiting.push(id);
-      });
+      else
+        this.later(800, () => {
+          this.status(id, 'WAITING');
+          this.waiting.push(id);
+        });
     });
   }
 
-  private transmit(id: string) {
+  transmit(id) {
     this.later(1000, () => this.status(id, 'TRANSMITTING'));
     this.later(2500, () => this.status(id, `SENT_TO_MESH|${NEXT_HOP}`));
-    this.later(6000, () => {
-      this.battery -= 2;
-      this.sendInfo();
-      this.status(id, 'DELIVERED');
-    });
+    this.later(6000, () => this.status(id, 'DELIVERED'));
   }
 
-  private setConnected(connected: boolean) {
+  setConnected(connected) {
     this.connected = connected;
     this.emit({ type: 'connection', connected });
   }
 
-  private sendInfo() {
-    if (this.connected) this.emit({ type: 'line', line: `INFO|${this.battery}|${this.nodes}` });
+  sendInfo() {
+    if (this.connected) this.emit({ type: 'line', line: `INFO|-|${this.nodes}` });
   }
 
-  private status(id: string, rest: string) {
+  status(id, rest) {
     if (this.connected) this.emit({ type: 'line', line: `STATUS|${id}|${rest}` });
   }
 
-  private emit(event: LinkEvent) {
+  emit(event) {
     this.listeners.forEach((listener) => listener(event));
   }
 
-  private later(ms: number, fn: () => void) {
+  later(ms, fn) {
     this.timers.push(setTimeout(fn, ms));
   }
 }

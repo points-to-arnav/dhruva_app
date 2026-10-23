@@ -1,6 +1,8 @@
 # Phone ↔ dongle USB protocol (V1)
 
-The phone app and the dongle (ESP32-C3, native USB CDC) exchange **text lines** over the serial port. Each line is a message: fields separated by `|`, ending in `\n` (a trailing `\r` is ignored). The baud rate doesn't matter on the C3's native USB.
+The phone app (a web page in Chrome) and the dongle (ESP32-C3 Super Mini, built-in USB Serial/JTAG, VID `0x303A` PID `0x1001`) exchange **text lines** over the USB serial port. Each line is a message: fields separated by `|`, ending in `\n` (a trailing `\r` is ignored). The app opens the port at 115200 baud, which the C3's native USB ignores.
+
+When the app opens the port it sets **DTR and RTS both low**. On the C3's USB Serial/JTAG, RTS high holds the chip in reset and DTR high pulls the boot pin, so the app keeps both low. If the chip resets anyway when the port opens, the app asks `INFO?` 300 ms after opening; reply once you've booted.
 
 The phone never builds or reads LoRa packets. The dongle turns `SEND` into a DATA packet (packet_v2, section 3) and reports its progress with `STATUS`.
 
@@ -32,7 +34,7 @@ The dongle assigns `source_id` (its node ID), `message_id` (its counter in flash
 
 ### `INFO?`: ask for dongle info
 
-Sent when the port opens. The dongle answers with `INFO`.
+Sent 300 ms after the port opens. The dongle answers with `INFO`.
 
 ## Dongle → app
 
@@ -67,7 +69,7 @@ INFO|<battery>|<nodes>
 INFO|78|2
 ```
 
-- `battery`: percent 0–100, or `-` if unknown.
+- `battery`: the dongle's battery percent 0–100, or `-`. The app currently ignores it and shows the phone's battery instead.
 - `nodes`: number of infra nodes heard in the last 3 minutes (the dongle's candidate list).
 
-Send it in answer to `INFO?` and whenever either value changes.
+Send it in answer to `INFO?` and whenever the node count changes.

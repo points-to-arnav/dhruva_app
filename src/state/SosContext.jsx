@@ -1,50 +1,18 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
-import { usePosition, type LocationStatus } from '../hooks/usePosition';
-import {
-  createLink,
-  encodeSend,
-  INFO_REQUEST,
-  parseLine,
-  type DongleEvent,
-  type MessageState,
-  type SerialLink,
-} from '../serial';
-import { clampPeople, type Need } from './sos';
+import { useBattery } from '../hooks/useBattery';
+import { usePosition } from '../hooks/usePosition';
+import { createLink, encodeSend, INFO_REQUEST, parseLine } from '../serial';
+import { clampPeople } from './sos';
+import { SosContext } from './useSos';
 
-export type Message = {
-  id: string | null;
-  state: MessageState | null;
-  nextHop: string | null;
-  deliveredAt: Date | null;
-};
+// Give a C3 that reset on port open a moment before asking for INFO.
+const INFO_DELAY_MS = 300;
 
-type State = {
-  connected: boolean;
-  battery: number | null;
-  nodesInRange: number | null;
-  needs: Need[];
-  people: number;
-  active: boolean;
-  sentRequest: { needs: Need[]; people: number } | null;
-  message: Message;
-  sendError: string | null;
-};
+const emptyMessage = { id: null, state: null, nextHop: null, deliveredAt: null };
 
-type Action =
-  | { type: 'connection'; connected: boolean }
-  | { type: 'dongle'; event: DongleEvent }
-  | { type: 'toggleNeed'; need: Need }
-  | { type: 'setPeople'; people: number }
-  | { type: 'sendStarted' }
-  | { type: 'sendFailed'; message: string }
-  | { type: 'reset' };
-
-const emptyMessage: Message = { id: null, state: null, nextHop: null, deliveredAt: null };
-
-const initialState: State = {
+const initialState = {
   connected: false,
-  battery: null,
   nodesInRange: null,
   needs: [],
   people: 1,
@@ -52,19 +20,18 @@ const initialState: State = {
   sentRequest: null,
   message: emptyMessage,
   sendError: null,
+  connectError: null,
 };
 
-function reducer(state: State, action: Action): State {
+function reducer(state, action) {
   switch (action.type) {
     case 'connection':
       return action.connected
-        ? { ...state, connected: true }
-        : { ...state, connected: false, battery: null, nodesInRange: null };
+        ? { ...state, connected: true, connectError: null }
+        : { ...state, connected: false, nodesInRange: null };
     case 'dongle': {
       const event = action.event;
-      if (event.type === 'info') {
-        return { ...state, battery: event.battery, nodesInRange: event.nodesInRange };
-      }
+      if (event.type === 'info') return { ...state, nodesInRange: event.nodesInRange };
       // The first STATUS after a SEND names our message; later ones must match
       // it. Others are older messages still stored on the dongle.
       const { message } = state;
@@ -79,6 +46,8 @@ function reducer(state: State, action: Action): State {
         },
       };
     }
+    case 'connectFailed':
+      return { ...state, connectError: action.message };
     case 'toggleNeed':
       return {
         ...state,
@@ -99,32 +68,17 @@ function reducer(state: State, action: Action): State {
     case 'sendFailed':
       return { ...state, sendError: action.message };
     case 'reset':
-      return {
-        ...initialState,
-        connected: state.connected,
-        battery: state.battery,
-        nodesInRange: state.nodesInRange,
-      };
+      return { ...initialState, connected: state.connected, nodesInRange: state.nodesInRange };
+    default:
+      return state;
   }
 }
 
-type SosContextValue = State & {
-  location: LocationStatus;
-  isMock: boolean;
-  toggleNeed: (need: Need) => void;
-  setPeople: (people: number) => void;
-  sendSos: () => void;
-  reset: () => void;
-  toggleMockConnection: () => void;
-  toggleMockNodes: () => void;
-};
-
-const SosContext = createContext<SosContextValue | null>(null);
-
-export function SosProvider({ children }: { children: ReactNode }) {
-  const [link] = useState<SerialLink>(createLink);
+export function SosProvider({ children }) {
+  const [link] = useState(createLink);
   const [state, dispatch] = useReducer(reducer, initialState);
   const { status: location, position } = usePosition();
+  const battery = useBattery();
 
   // Latest picks and position for sendSos, which stays stable so the
   // countdown timer doesn't restart on every GPS update.
@@ -134,10 +88,11 @@ export function SosProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
+    let infoTimer;
     const unsubscribe = link.subscribe((event) => {
       if (event.type === 'connection') {
         dispatch({ type: 'connection', connected: event.connected });
-        if (event.connected) link.writeLine(INFO_REQUEST).catch(() => {});
+        if (event.connected) infoTimer = setTimeout(() => link.writeLine(INFO_REQUEST).catch(() => {}), INFO_DELAY_MS);
         return;
       }
       const parsed = parseLine(event.line);
@@ -145,40 +100,46 @@ export function SosProvider({ children }: { children: ReactNode }) {
     });
     link.start();
     return () => {
+      clearTimeout(infoTimer);
       unsubscribe();
       link.stop();
     };
   }, [link]);
 
-  const sendSos = useCallback(() => {
-    const { needs, people } = latest.current.state;
-    dispatch({ type: 'sendStarted' });
-    const line = encodeSend({ people, needs, position: latest.current.position, time: new Date() });
-    link.writeLine(line).catch((error: unknown) => {
-      dispatch({ type: 'sendFailed', message: error instanceof Error ? error.message : String(error) });
+  const connect = useCallback(() => {
+    link.connect().catch((error) => {
+      // NotFoundError: the user closed the picker without choosing.
+      if (error?.name !== 'NotFoundError') dispatch({ type: 'connectFailed', message: error?.message ?? String(error) });
     });
   }, [link]);
 
-  const value = useMemo<SosContextValue>(
+  const sendSos = useCallback(() => {
+    const { state: current, position: where } = latest.current;
+    dispatch({ type: 'sendStarted' });
+    const line = encodeSend({ people: current.people, needs: current.needs, position: where, time: new Date() });
+    link.writeLine(line).catch((error) => {
+      dispatch({ type: 'sendFailed', message: error?.message ?? String(error) });
+    });
+  }, [link]);
+
+  const value = useMemo(
     () => ({
       ...state,
+      battery,
       location,
-      isMock: !!link.mock,
+      supported: link.supported,
+      unsupportedReason: link.unsupportedReason,
+      isMock: Boolean(link.mock),
+      connect,
+      sendSos,
       toggleNeed: (need) => dispatch({ type: 'toggleNeed', need }),
       setPeople: (people) => dispatch({ type: 'setPeople', people }),
-      sendSos,
       reset: () => dispatch({ type: 'reset' }),
       toggleMockConnection: () => link.mock?.toggleConnection(),
       toggleMockNodes: () => link.mock?.toggleNodes(),
     }),
-    [state, location, link, sendSos],
+    [state, battery, location, link, connect, sendSos],
   );
 
   return <SosContext.Provider value={value}>{children}</SosContext.Provider>;
-}
-
-export function useSos() {
-  const value = useContext(SosContext);
-  if (!value) throw new Error('useSos must be used inside SosProvider');
-  return value;
 }
