@@ -10,7 +10,7 @@ import { SosContext } from './useSos';
 // Give a C3 that reset on port open a moment before asking for INFO.
 const INFO_DELAY_MS = 300;
 
-// Fake STATUS sequence (see FAKE_STATUS_PROGRESS): one step per random delay.
+// Fake status sequence (see FAKE_STATUS_PROGRESS): one step per random delay.
 const FAKE_STEPS = [{ state: 'STORED' }, { state: 'SENT_TO_MESH', nextHop: '0x0011' }, { state: 'DELIVERED' }];
 
 function fakeStepDelay() {
@@ -41,7 +41,7 @@ function reducer(state, action) {
     case 'dongle': {
       const event = action.event;
       if (event.type === 'info') return { ...state, nodesInRange: event.nodesInRange };
-      // The first STATUS after a SEND names our message; later ones must match
+      // The first status after a send names our message; later ones must match
       // it. Others are older messages still stored on the dongle.
       const { message } = state;
       if (!state.active || (message.id !== null && message.id !== event.messageId)) return state;
@@ -128,7 +128,7 @@ export function SosProvider({ children }) {
         return;
       }
       const parsed = parseLine(event.line);
-      // While faking, the dongle's own STATUS lines would fight the fake ones.
+      // While faking, the dongle's own status lines would fight the fake ones.
       if (parsed && !(fakeProgress && parsed.type === 'status')) dispatch({ type: 'dongle', event: parsed });
     });
     link.start();

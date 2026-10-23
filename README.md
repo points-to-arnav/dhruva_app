@@ -41,14 +41,14 @@ Open `http://localhost:5173/?mock`. A simulated dongle connects by itself:
 ## Where things live
 
 - `design/`: the mesh design: plan, LoRa packet formats, routing and channel-access algorithm.
-- `docs/usb-protocol.md`: the phone ↔ dongle text protocol (`SEND`, `INFO?`, `STATUS`, `INFO`). The firmware has to speak it.
+- `docs/usb-protocol.md`: the phone ↔ dongle protocol, JSON lines (`send`, `info_request`, `status`, `info`). The firmware has to speak it.
 - `src/serial/webSerialLink.js`: the USB link. On Android it uses WebUSB through [`web-serial-polyfill`](https://github.com/google/web-serial-polyfill); on desktop, the Web Serial API. Add `?serial=native` or `?serial=webusb` to force one.
 - `src/serial/protocol.js`: encodes `SEND` and parses dongle lines.
 - `src/serial/mockLink.js`: the simulated dongle used by `?mock`.
 - `src/config.js`: `DEMO_POSITION`, the preconfigured victim position for the live demo (set it to `null` to use the phone's GPS), and the dongle's USB IDs.
 - `src/state/SosContext.jsx`: app state (dongle, picks, message progress, phone battery, position).
 
-The LoRa packet format is in `design/packet-design.md` (rev 5). Flags and people come from the screen; "Medical help" sets the Injured bit. The battery shown is the phone's (Battery Status API).
+The LoRa packet format is in `design/packet-design.md` (rev 4). Flags and people come from the screen; "Medical help" sets the Injured bit. The battery shown is the phone's (Battery Status API).
 
 ## Checks
 
