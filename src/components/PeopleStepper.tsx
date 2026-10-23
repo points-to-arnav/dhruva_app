@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { MAX_PEOPLE, MIN_PEOPLE } from '../state/sos';
@@ -7,14 +7,15 @@ import { colors } from '../theme';
 type Props = { value: number; onChange: (value: number) => void };
 
 export function PeopleStepper({ value, onChange }: Props) {
-  // Local text so the field can be empty mid-edit; committed on blur.
-  const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
+  // What the user is typing, so the field can be empty mid-edit; null when
+  // not editing. Committed (and clamped by the parent) on blur.
+  const [draft, setDraft] = useState<string | null>(null);
 
   const commit = () => {
-    const parsed = parseInt(text, 10);
-    if (Number.isNaN(parsed)) setText(String(value));
-    else onChange(parsed);
+    if (draft === null) return;
+    const parsed = parseInt(draft, 10);
+    if (!Number.isNaN(parsed)) onChange(parsed);
+    setDraft(null);
   };
 
   return (
@@ -34,8 +35,8 @@ export function PeopleStepper({ value, onChange }: Props) {
           <Text style={styles.sign}>−</Text>
         </Pressable>
         <TextInput
-          value={text}
-          onChangeText={(t) => setText(t.replace(/[^0-9]/g, ''))}
+          value={draft ?? String(value)}
+          onChangeText={(t) => setDraft(t.replace(/[^0-9]/g, ''))}
           onBlur={commit}
           onSubmitEditing={commit}
           keyboardType="number-pad"

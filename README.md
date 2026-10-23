@@ -9,6 +9,8 @@ npm install
 npx expo start
 ```
 
+Check with `npm run typecheck` and `npm run lint`.
+
 Right now the app talks to a **mock dongle**, so it runs in Expo Go on any phone or emulator. Scan the QR code from `npx expo start`.
 
 The real USB link needs a native module, so it needs a development build (`npx expo run:android` or `eas build --profile development`), not Expo Go.

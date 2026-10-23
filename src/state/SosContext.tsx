@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 
 import { usePosition, type LocationStatus } from '../hooks/usePosition';
 import {
@@ -122,17 +122,16 @@ type SosContextValue = State & {
 const SosContext = createContext<SosContextValue | null>(null);
 
 export function SosProvider({ children }: { children: ReactNode }) {
-  const linkRef = useRef<SerialLink | null>(null);
-  if (!linkRef.current) linkRef.current = createLink();
-  const link = linkRef.current;
-
+  const [link] = useState<SerialLink>(createLink);
   const [state, dispatch] = useReducer(reducer, initialState);
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
   const { status: location, position } = usePosition();
-  const positionRef = useRef(position);
-  positionRef.current = position;
+
+  // Latest picks and position for sendSos, which stays stable so the
+  // countdown timer doesn't restart on every GPS update.
+  const latest = useRef({ state, position });
+  useEffect(() => {
+    latest.current = { state, position };
+  });
 
   useEffect(() => {
     const unsubscribe = link.subscribe((event) => {
@@ -152,9 +151,9 @@ export function SosProvider({ children }: { children: ReactNode }) {
   }, [link]);
 
   const sendSos = useCallback(() => {
-    const { needs, people } = stateRef.current;
+    const { needs, people } = latest.current.state;
     dispatch({ type: 'sendStarted' });
-    const line = encodeSend({ people, needs, position: positionRef.current, time: new Date() });
+    const line = encodeSend({ people, needs, position: latest.current.position, time: new Date() });
     link.writeLine(line).catch((error: unknown) => {
       dispatch({ type: 'sendFailed', message: error instanceof Error ? error.message : String(error) });
     });
