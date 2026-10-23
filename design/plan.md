@@ -91,13 +91,13 @@ SF 9, BW 125 kHz, CR 4/5, sync word `0x12`, preamble 8, explicit header, hardwar
 | IDE | **Arduino IDE** |
 | Board package | esp32 by Espressif **3.x**, board **ESP32C3 Dev Module** |
 | Board settings | USB CDC On Boot: **Enabled** (so `Serial` is the native USB port), Flash Size: 4 MB |
-| LoRa library | **LoRa by Sandeep Mistry** (≥ 0.8.0) |
-| GPS library | **TinyGPSPlus** by Mikal Hart (relay sketch only) |
+| Libraries | **LoRa by Sandeep Mistry** (`LoRa.h`) and `SPI.h`; nothing else to install |
+| GPS | own NMEA reader (GGA + RMC) in `gps.cpp`, no GPS library |
 | Config storage | `Preferences` (NVS), built in |
 | Message storage | raw flash partition via `esp_partition_*`, built in |
-| Sketchbook location | set to `firmware/` once (File → Preferences), so the shared `firmware/libraries/DhruvaMesh` library is found |
+| Sketch | `firmware/firmware.ino`; the module is picked in `firmware/role.h` |
 
-Each sketch folder has its own `partitions.csv`, which the esp32 core picks up automatically:
+`firmware/partitions.csv` sits next to the sketch, so the esp32 core picks it up automatically:
 
 ```
 # Name,   Type, SubType, Offset,   Size
@@ -109,39 +109,50 @@ mesh,     data, 0x40,    0x210000, 0x40000
 
 ## 5. Firmware
 
-Three sketches, one per role, share one library. The mesh logic exists once, and each sketch adds only what its role needs on the USB side.
+**One firmware for every module.** The module is picked at compile time in `role.h`, with exactly one flag set to 1:
+
+```c
+#define IS_DONGLE 0   // plugged into the phone: originates SOS messages, never relays
+#define IS_RELAY  1   // balloon or ground node (which one: `set role` over USB)
+#define IS_HELPER 0   // rescue base: final stop, prints to the PC, sends DELIVERY
+```
+
+The mesh code is the same on every module. The flags only switch the role-specific parts: the phone protocol (dongle), the GPS (relay), the DATA printout and time root (helper), and whether DATA is accepted and forwarded.
 
 ```
 firmware/
-  libraries/DhruvaMesh/
-    library.properties
-    src/
-      DhruvaMesh.h   public API: mesh_begin(), mesh_loop(), hooks for the sketches
-      config.*       NVS config, USB command line
-      radio.*        LoRa library wrapper: DIO0 interrupt, channel switch, CAD
-      packet.*       serialize / deserialize, crc8, airtime
-      timesync.*     superframe clock, parent choice
-      mac.*          control / data / guard windows, one exchange per pair
-      neighbor.*     neighbour table, states, range filter, dongle candidates
-      routing.*      next-hop selection
-      txq.*          jobs, retries, backoff
-      store.*        raw-partition message log, seen set, boot scan
-      geo.*          distance, progress to the Helper
-      log.*          readable text + @JSON lines
-  dongle/   dongle.ino   phone.cpp    partitions.csv   phone protocol (SEND / STATUS / INFO)
-  relay/    relay.ino    gps.cpp      partitions.csv   NEO-6M position, INI on first fix
-  helper/   helper.ino   report.cpp   partitions.csv   DATA block + JSON to the PC
+  firmware.ino     setup() + loop()
+  role.h           IS_DONGLE / IS_RELAY / IS_HELPER, role IDs, default node ID
+  pins.h           wiring (section 3)
+  partitions.csv   adds the 256 KB `mesh` partition
+  mesh_config.*    NVS config, own message counter
+  cli.*            USB command line (and routes phone lines to phone.*)
+  radio.*          LoRa library wrapper: DIO0 interrupt, channel switch, CAD
+  packet.*         serialize / deserialize, crc8, airtime
+  timesync.*       superframe clock, parent choice
+  mac.*            control / data / guard windows, one exchange per pair, retries
+  neighbor.*       neighbour table, states, range filter, dongle candidates
+  routing.*        next-hop selection
+  txq.*            jobs, backoff state, refill from flash
+  store.*          raw-partition message log, seen set, boot scan
+  mesh.*           receive dispatch, store before ACK, DELIVERY, own messages
+  geo.*            distance, progress to the Helper
+  timeutil.*       Unix time <-> UTC
+  mesh_log.*       readable text + @JSON lines
+  phone.*          dongle: SEND / STATUS / INFO
+  gps.*            relay: NEO-6M NMEA reader, INI on first fix
+  report.*         helper: DATA block to the PC
 ```
 
 The code style is plain C-style modules (structs + functions, no class hierarchies) with a single main loop and no extra FreeRTOS tasks:
 
 ```c
 void loop() {
-    usb_poll();                   // CLI, and on the dongle the phone protocol
-    radio_poll();                 // DIO0 flag -> on_rx / CAD done
-    timesync_tick();
-    mac_tick(esp_timer_get_time());   // control / data / guard logic, exchanges
-    // role extras: relay -> gps_poll(); helper -> nothing
+    cli_poll();                       // CLI, and on the dongle the phone protocol
+    if (radio_poll(f)) mesh_on_frame(f);  // DIO0 flag -> receive dispatch
+    gps_poll();                       // relay only
+    mesh_tick(now);                   // time sync, control / data / guard windows, exchanges
+    phone_tick(now);                  // dongle only: INFO when the node count changes
 }
 ```
 
@@ -162,7 +173,7 @@ These are text commands, one per line, so any serial monitor works. Config is sa
 ```
 show cfg | nbr | msgs | stats | sync
 set id 0x0011
-set role balloon|ground                 # relay sketch only
+set role balloon|ground                 # relays only
 set helper 0x0001 27.752000 85.320000   # helper ID + position
 set pos 27.716000 85.320000 1300        # fallback / fixed position
 set txp 3                               # dBm
@@ -203,7 +214,7 @@ latitude       : 27.680000 N
 longitude      : 85.320000 E
 altitude       : 1300 m
 position acc.  : no fix
-timestamp      : 2026-10-23 11:00:05 UTC (1761217205)
+timestamp      : 2025-10-23 11:00:05 UTC (1761217205)
 -------------------------------------------
 path           : 0x2001 -> 0x0011 (2 nodes)
 last hop       : 0x0011, RSSI -71 dBm, SNR 8.5 dB
@@ -316,6 +327,7 @@ Custom PCB, solar power, drone integration, LTE / 4G, sensors, OLED / e-paper, d
 | `sync_depth` in `role_flags` bits 4–6 | Bits 4–7, 15 = unsynced | The clock reaches 14 hops, so it covers TTL 10 |
 | No GPS in the demo (TX RX plan) | NEO-6M on relays, flash fallback until the first fix; dongle and Helper without GPS | Team hardware decision |
 | PlatformIO + RadioLib (TX RX plan) | Arduino IDE + Sandeep Mistry LoRa | Team toolchain; the gaps (no DIO1, CAD result, interrupt-safe RX) are covered in section 5 |
+| A codebase with the role as a config value (TX RX plan) | One firmware; the role is a compile-time flag in `role.h` (`IS_DONGLE` / `IS_RELAY` / `IS_HELPER`) | Each board's role is fixed by its hardware (phone port, GPS, PC link); balloon vs ground stays a USB setting |
 | TX RX plan pins (with DIO1) | Team wiring in section 3, no DIO1 | Boards already wired |
 | Phone frame `SEND\|app_id\|…` / `ST\|…` (TX RX plan §13a) | The protocol the web app already speaks: `SEND\|people\|flags\|lat\|lon\|alt\|acc\|ts`, `STATUS`, `INFO` | The app is built; the phone supplies the victim position |
 | DELIVERY_ACK `ack_to` = DELIVERY sender | `ack_to` = stored next_hop; matched on `ack_from` + key | DELIVERY has no sender field (packet design section 6) |
