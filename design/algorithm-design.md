@@ -1,6 +1,6 @@
 # Dhruva Jaal: algorithm design (V1)
 
-How every node decides **when** to transmit, **on which channel**, **to whom**, and what it does with each packet it receives. It covers any number of nodes. The packet formats are in [packet-design.md](packet-design.md). The build plan, hardware and milestones are in [plan.md](plan.md).
+How every node decides **when** to transmit, **to whom**, and what it does with each packet it receives. It covers any number of nodes. The packet formats are in [packet-design.md](packet-design.md). The build plan, hardware and milestones are in [plan.md](plan.md). The firmware that implements it is [../firmware/firmware.ino](../firmware/firmware.ino).
 
 ## Core rules
 
@@ -20,125 +20,66 @@ Priority order: **reliability > link stability > network capacity > latency.**
 
 ## 1. Roles
 
-Each role runs the same mesh code. Only the role and its config differ.
+Each role runs the same mesh code. Only the role flag at the top of the firmware differs.
 
 | | Helper | Relay (balloon or ground) | Dongle |
 | --- | --- | --- | --- |
-| Time sync | root, sync_depth 0 | from its parent's HELLO | from its parent's HELLO |
-| Sends HELLO / INI | yes, HELLO in slot 0 | yes, in a random control slot | **never** |
+| Sends HELLO / INI | yes | yes | **never** |
 | Accepts DATA | yes (final stop) | yes, stores and forwards | **no** (never relays) |
 | Sends | ACK, DELIVERY | ACK, forwarded DATA, DELIVERY, DELIVERY_ACK | its own DATA, DELIVERY_ACK |
-| GPS | no (fixed position in flash) | NEO-6M, flash position as fallback | no (position comes from the phone) |
-| USB side | readable DATA block + JSON log to the PC | config CLI + JSON log | phone protocol + config CLI |
+| GPS | no (fixed position) | NEO-6M, fixed position until the first fix | no (position comes from the phone) |
+| USB side | readable DATA block + JSON log to the PC | JSON log, test commands | phone protocol + test commands |
 | In others' neighbour tables | yes | yes | no |
 
 The dongle is a mesh **edge** node. It originates its own messages and receives ACK and DELIVERY for them, but it never forwards anyone else's. That keeps trapped people's batteries for their own SOS, and it keeps dongles, which appear and disappear, out of routing.
 
-## 2. Channel access: hybrid TDM + FDM
+## 2. Channel access: one channel, listen before talk
 
-The SX1278 is one half-duplex radio. It hears **one** frequency at a time and is deaf while transmitting. FDM therefore only works if the sender knows which channel the receiver is on right now. TDM provides that shared clock.
+Every node uses the same channel (433.175 MHz) for every packet. The SX1278 is half-duplex: it hears that channel whenever it is not transmitting.
 
-- **TDM:** time is cut into a repeating **superframe**. A short **control window** has every node on channel 0 for HELLO, INI and time sync. A longer **data window** carries DATA, ACK, DELIVERY and DELIVERY_ACK in 800 ms **pairs**.
-- **FDM:** in the data window, every node listens on its own **home channel**, `home_ch(node_id)` (packet design section 7). To send to node X, a node switches to X's channel, transmits, waits there for the ACK, and switches back.
+| Packet | How it goes out |
+| --- | --- |
+| DATA, DELIVERY, HELLO, INI | **CAD first** (Channel Activity Detection, ~8 ms). Busy → wait `random(1..4)` SLOTs and try again; that is not counted as a retry. |
+| ACK, DELIVERY_ACK | **At once**, no CAD: the sender is waiting for it, and everyone else defers to the exchange they can hear. |
 
-### Superframe
+`SLOT = 1.3 s` fits the longest packet (a JSON DATA with a full path, 1.23 s). A sender waits **1 SLOT after its TX ends** for the ACK: the receiver's JSON parse and flash write (tens of ms) plus the 144 ms ACK fit easily inside it.
 
-```
-SLOT       = 400 ms   (fits the largest packet, 329 ms + guards)
-PAIR       = 2 SLOTs = 800 ms   (one DATA or DELIVERY + its ACK)
+**CAD caveat:** SX127x CAD only detects a **preamble**. A packet already past its preamble is invisible to it. The random backoff after a busy channel or a lost ACK spreads senders out so this stays rare; when two packets do collide, the ACK is missing and the retry rules (section 7) take over.
 
-slot:  0   1   2   3 | 4 5 | 6 7 | ... | 22 23 | 24
-       [ CONTROL ch0 ] [P0 ] [P1 ]  ...  [ P9  ] [G]
-         HELLO / INI    DATA window, home channels   guard (ch0, flash erase)
-```
+**HELLO timing** (infra only): every `HELLO_INTERVAL` plus a random jitter of up to a sixth of it, so beacons don't line up.
 
 | Parameter | Demo | Deployment (first guess) |
 | --- | --- | --- |
-| Superframe | 25 slots (10 s) | 150 slots (60 s) |
-| Control slots | 4 | 32 |
-| Data pairs | 10 | 58 |
-| HELLO interval | every superframe (10 s) | every superframe (60 s) |
-| Neighbour STALE after | 3 missed HELLOs (30 s) | 3 missed HELLOs (3 min) |
-| Sync lost after no parent beacon for | 6 superframes | 6 superframes |
+| HELLO interval | 10 s (+ 0–1.7 s) | 60 s (+ 0–10 s) |
+| Neighbour STALE after | 3 missed HELLOs (35 s) | 3 missed HELLOs (3.5 min) |
+| Neighbour forgotten after | 10 HELLO intervals | 10 HELLO intervals |
 
-All of these are set over USB and must be the same on every node.
+With 40 balloons in line of sight, 40 × 185 ms every 60 s is about 12 % channel load for beacons.
 
-- **Control window (ch 0).** Slot 0 belongs to the helper, the time root. Every other synced infra node sends its HELLO in a random slot from 1 to `ctrl_slots - 1`, re-picked each superframe, so two nodes that collide once don't collide forever. In its slot a node waits for the guard (25 ms) plus `random(0..3) × 12 ms`, then runs CAD. If the channel is busy, it skips this superframe's HELLO.
-- **Data window (home channels).** Exchanges may only **start** at a pair boundary, and each node starts at most one per pair.
-- **Guard slot (last slot).** Everyone returns to ch 0. Slow work happens only here: flash sector erase, refilling the job queue.
+What one channel does not fix: everything ends at the helper. Helper capacity, about 1,000–1,500 messages per hour, is the bottleneck. Larger areas need more helpers (V2). Spreading exchanges over several channels (TDM + FDM) is a V2 option.
 
-### Does DATA + ACK fit in one pair? (worst case: largest DATA, 11-entry path)
+## 3. Neighbour discovery (infra nodes)
 
-| Step | ms (cumulative) |
-| --- | --- |
-| guard at pair start | 25 |
-| random start jitter (0–3 × 12 ms) | 61 |
-| CAD (~2 symbols at SF9) | 70 |
-| DATA, 51 B | 399 |
-| receiver: decode, CRC, flash write, build ACK | ~430 |
-| ACK, 10 B | ~575 |
-| latencies, slack | ~600 |
-| **pair length** | **800** (≥ 175 ms margin, including the 25 ms end guard) |
-
-**CAD caveat:** SX127x CAD only detects a **preamble**. A packet that is already past its preamble is invisible to it. The random start jitter is what makes CAD useful in a slotted system: the later starter sees the earlier one's preamble and backs off.
-
-What FDM buys: exchanges with **different** receivers run at the same time on different channels. That matters for balloons, which at altitude all hear each other. With 7 data channels, up to 7 exchanges run in parallel. What it does not fix: everything ends at the helper, so everything ends on the helper's channel. Helper capacity, about 1,000–1,500 messages per hour, stays the bottleneck. Larger areas need more helpers (V2).
-
-## 3. Time sync (works indoors without GPS)
-
-The **helper is the root**. It starts superframe 0 at boot and never syncs to anyone. Every other node, dongles included, syncs from a neighbour's HELLO or INI. GPS time is **not** used for slot timing: indoor nodes have no fix, and two clocks would disagree.
-
-Each beacon carries the sender's `sync_depth` (in `role_flags`) and `sf_offset_ms`: how far into its superframe the sender started this TX.
-
-```
-on HELLO/INI from N with depth d_N < 15:
-    t_rx     = RxDone interrupt time (µs, esp_timer_get_time)
-    t_tx     = t_rx - airtime_us(len) - TX_LATENCY_US      // constant, measured once
-    sf_start = t_tx - sf_offset_ms * 1000
-
-    parent choice:
-        unsynced              -> adopt N
-        d_N < depth(parent)   -> switch to N               // strictly closer to the root
-        tie                   -> keep the current parent
-    if N is my parent:
-        err = sf_start - my_sf_start      (wrapped to ±superframe/2)
-        if |err| > 50 ms : my_sf_start  = sf_start         // jump
-        else             : my_sf_start += err / 2          // smooth
-        my_depth = d_N + 1         (if that reaches 15: unsynced)
-        last_parent_beacon = now
-```
-
-| State | Radio | May send DATA / DELIVERY | Sends HELLO |
-| --- | --- | --- | --- |
-| **UNSYNCED** (boot, or parent silent for 6 superframes) | RX on ch 0 all the time | no, messages stay WAITING | INI once at boot, at a random time 0–2 s after start, with CAD |
-| **SYNCED** | follows the superframe | yes | yes, in the control window |
-
-- **Loops can't last.** If A syncs from B and B later syncs from A, each beacon raises the other's depth by one until it reaches 15 (unsynced). An unsynced node stops sending HELLOs, so the loop dies out.
-- **Drift is a non-issue.** ESP32-C3 crystals are ±10–20 ppm, so two nodes drift ≤ 2.4 ms per minute, far inside the 25 ms guards. All timing uses `esp_timer_get_time()` (64-bit µs), never `millis()`.
-- **Target accuracy is ±10 ms** per hop, with `TX_LATENCY_US` calibrated once on two boards.
-
-## 4. Neighbour discovery (infra nodes)
-
-Every HELLO and INI received with a good CRC updates the neighbour table. Discovery is **not** a blocking startup phase: a node starts receiving, forwarding and beaconing straight away.
+Every HELLO and INI received with a good CRC updates the neighbour table. Discovery is **not** a blocking startup phase: a node starts receiving, forwarding and beaconing straight away. An infra node sends an INI at a random moment 0–2 s after boot, and another one on its first GPS fix.
 
 **Range filter (demo only).** `DEMO_RANGE_KM` (0 = off) is applied first, on every node including dongles: a beacon from a sender farther than `DEMO_RANGE_KM` from this node's position is dropped, so that sender never becomes a neighbour or a candidate. This lets three boards on one table act like nodes 4 km apart. DATA, ACK and DELIVERY need no filter, because they are addressed by `next_hop_id` / `to_id`.
 
-**Neighbour entry** (table of 32; when it is full, the oldest non-ACTIVE entry is replaced):
+**Neighbour entry** (table of 16; when it is full, the oldest non-ACTIVE entry is replaced):
 
 ```
-node_id, role, position, position_acc, gps_fix, helper_id (from INI)
-rssi, snr (last), snr_avg (EWMA, α = 0.25)
-last_seen, last_seq, hello_count, missed_hellos (seq gaps)
-ack_history (last 10 sends: ok/fail bits), packets_sent / acked / failed
-state, progress_to_helper (metres)
+node_id, role, position
+rssi (last), snr (average, EWMA alpha = 0.25)
+last_seen, hello_count
+ack_history (last 10 sends: ok / fail bits)
+state
 ```
 
-**States** (starting values, to tune in tests):
+**States:**
 
 ```
           any HELLO/INI
    ──────────────────────────> HEARD
-                                 │ ≥ 3 HELLOs AND snr_avg > -10 dB
+                                 │ ≥ 3 HELLOs AND snr > -10 dB
                                  v              (SF9 floor ≈ -12.5 dB → 2.5 dB margin)
                                ACTIVE
                                  │ 3 consecutive HELLOs missed
@@ -148,44 +89,42 @@ state, progress_to_helper (metres)
 ```
 
 - A STALE neighbour that is heard again goes back to HEARD with `hello_count = 0` and a cleared ACK history. It has to earn ACTIVE again with 3 fresh HELLOs. Without that probation, a neighbour made STALE by its ACK rate would never be tried again and could never recover.
-- **Balloons drift:** position and `progress_to_helper` are overwritten on every HELLO.
-- **Forwarding set:** the best **4** ACTIVE neighbours, ranked as in section 5 and recomputed on every HELLO. The limit is **outbound only**: a node accepts DATA from any node or dongle that names it as `next_hop_id`. Refusing inbound would strand dongles.
+- **Balloons drift:** the position is overwritten on every HELLO, and progress to the helper is computed from the latest one.
+- A node accepts DATA from **any** node or dongle that names it as `next_hop_id`. Refusing inbound would strand dongles.
 
-**Dongle candidate list.** Dongles keep no states. A candidate is any infra node heard in the last 3 HELLO intervals (30 s demo, 3 min deployment), with its last SNR and position. The number of candidates is the `nodes` value in `INFO` to the phone app.
+**Dongle candidate list.** Dongles use the same table but don't wait for ACTIVE: a candidate is any infra node heard in the last 3 HELLO intervals. The number of candidates is the `nodes` value in `info` to the phone app.
 
-## 5. Routing: choosing the next hop
+## 4. Routing: choosing the next hop
 
 Each node routes on its own using local geography. There are no route tables and no full A*. Each node knows:
 
 ```
-MY position        (GPS, or flash fallback)
-HELPER position    (configured over USB)
+MY position         (GPS, or the fixed position)
+HELPER position     (the same constant on every node)
 NEIGHBOUR positions (from their HELLOs)
 
-progress(n) = dist(me, helper) - dist(n, helper)     (2D, altitude ignored)
+progress(n) = dist(me, helper) - dist(n, helper)     (2D, altitude ignored; the helper's own distance is 0)
 ```
 
 ### Infra node (relay)
 
 ```
-candidates = forwarding set (≤ 4 ACTIVE)
+candidates = ACTIVE neighbours
              minus nodes already in path_history          (loop prevention)
              minus nodes that already failed for this message
-1. prefer candidates with progress > 0
-2. among those: higher ACK success rate, then higher SNR
-3. none with progress > 0 -> recovery: any remaining candidate, same order
-4. forwarding set exhausted -> recovery: any other ACTIVE neighbour, same rules
-5. nothing left -> the message stays STORED, state WAITING
+order: progress > 0 first, then higher ACK success rate, then higher SNR
+pick the first; none with progress > 0 -> the best of the rest (recovery)
+nothing left -> the message stays STORED, state WAITING
 ```
 
-A neighbour with no sends yet counts as a 100 % ACK rate, so new links get tried.
+A neighbour with no sends yet counts as a 100 % ACK rate, so new links get tried. The "4 forwarding neighbours" of `packet v2` are the top 4 of this order; since the pick is always the best usable candidate, the firmware ranks all ACTIVE neighbours directly.
 
 ### Dongle
 
 ```
 candidates = infra nodes heard in the last 3 HELLO intervals,
              minus those that already failed for this message
-pick the highest SNR; within 1 dB -> the one with the most progress to the helper
+pick the highest SNR; within 1 dB of it -> the one with the most progress to the helper
 none -> WAITING (the phone never has to resend)
 ```
 
@@ -199,140 +138,109 @@ Dongles pick by SNR first because a trapped dongle's weakest link is its first h
     -> pick the next candidate
 all candidates fail
     -> keep the message STORED, state WAITING
-    -> re-evaluate when a neighbour becomes ACTIVE or changes position
+    -> try again when a neighbour becomes ACTIVE or moves (dongle: when any node is heard)
     -> and every 60 s (the failed list is cleared, so recovered neighbours are tried again)
 ```
 
 A node marks a message **FAILED** only when it receives it with `ttl == 0` and it is not the helper. The message stays stored there. No packet reports FAILED back to the source: the source keeps the message as SENT_TO_MESH and simply never gets a DELIVERY.
 
-## 6. Receive algorithm
+## 5. Receive algorithm
 
-The radio interrupt (DIO0) only records a flag and a timestamp. Everything else runs in the main loop.
+The firmware polls the radio every loop (`LoRa.parsePacket()`); no interrupts. A packet starting with `{` is a JSON DATA; anything else is a binary packet.
 
 ```
-on_rx(buf, len, rssi, snr, t_rx):
-    hardware CRC error                   -> stats.rx_crc_hw++, drop
-    crc8(buf[0..len-2]) != buf[len-1]    -> stats.rx_crc8++,  drop
-    version (buf[0] >> 4) != 1           -> drop
-    len != expected_len(type)            -> drop     // HELLO 20, INI 25, 10-byte types,
-                                                     // DATA 29 + 2n with 1 <= n <= 11
+on_rx(buf, len, rssi, snr):
+    buf[0] == '{':                       // JSON DATA
+        not valid JSON, "t" != "DATA", a field missing,
+        or path not 1..11 entries        -> drop
+        next_hop_id != me                -> drop; else on_data
+    else:                                // binary
+        crc8(buf[0..len-2]) != buf[len-1] -> drop
+        version (buf[0] >> 4) != 1        -> drop
+        len != expected_len(type)         -> drop  // HELLO 18, INI 23, the rest 10
     switch type:
-      HELLO, INI:   range filter (section 4)
-                    dongle: update candidate list; time sync; done
-                    infra:  neighbour_update; time sync; INI -> record helper_id
-      DATA:         next_hop_id != me -> stats.overheard++, drop
-                    on_data
-      ACK:          ack_to == me      -> match against the exchange in progress
+      HELLO, INI:   range filter; neighbour update; INI -> check helper_id
       DELIVERY:     to_id == me       -> on_delivery
-      DELIVERY_ACK: ack_from == the exchange's target and key matches -> exchange done
+      ACK, DELIVERY_ACK: only used while waiting for one (section 6)
 ```
 
-### on_data: the store-before-ACK path (must finish in ~30 ms)
+### on_data: the store-before-ACK path
 
 ```
 key      = (source_id, message_id)
 prev_hop = path_history[path_count - 1]
 
 if seen(key):                         // a retransmission: our ACK was lost
-    send ACK now to prev_hop; stats.dup++; return
+    send ACK now to prev_hop; return
 if I am a dongle:                     // dongles never accept DATA
     return
 if the store is full:                 // no ACK: the sender keeps it and tries elsewhere
-    log store_full; return
+    return
 
-store_append(packet, prev_hop, STORED)    // flash, into pre-erased space
-seen_add(key)                             // flash + RAM
-send ACK now to prev_hop                  // same channel, no CAD, no backoff
+store(packet, prev_hop)               // flash
+send ACK now to prev_hop              // no CAD, no backoff
+add key to the seen list
 
 if I am the helper:                   // the helper is the final stop for every DATA
     mark DELIVERED; print the DATA block; log JSON
     queue DELIVERY to prev_hop
 elif ttl == 0:
-    mark FAILED (TTL expired); log
+    mark FAILED (TTL expired)
 else:
     queue FORWARD
 ```
-
-The ACK goes out immediately, with no CAD, on the channel the DATA arrived on. The sender is sitting there waiting, and every other node defers to the pair it already sees in use.
 
 ### on_delivery
 
 ```
 send DELIVERY_ACK now (ack_to = stored next_hop, or 0xFFFF without a record)
-if already DELIVERED: return                // duplicate: our DELIVERY_ACK was lost
-mark DELIVERED
+if already DELIVERED: return                // a repeat: our DELIVERY_ACK was lost
+mark DELIVERED                              // also stops sending it, if our hand-off ACK was lost
 if source_id == me: report DELIVERED to the phone (dongle); return
-if I have the record: queue DELIVERY to its stored prev_hop
-else: log (the record was evicted; the chain stops here)
+queue DELIVERY to the stored prev_hop
 ```
 
-## 7. Transmit algorithm
+## 6. Transmit algorithm
 
-### Job queue
+Each stored message carries its own retry state (next hop, retry count, failed neighbours, next try time, waiting). Each loop sends **one** due message:
 
-```c
-typedef struct {
-    uint8_t  kind;            // OWN_DATA, FORWARD, DELIVERY
-    uint32_t key;             // source_id << 16 | message_id
-    uint16_t target;          // current next hop / to_id
-    uint8_t  retries;         // 0..5 for the current target
-    uint8_t  n_failed;        // targets that already failed for this job
-    uint16_t failed[8];
-    int64_t  not_before_us;   // backoff: earliest pair start for the next try
-    bool     waiting;         // no candidate; re-evaluated on events and every 60 s
-} job_t;
-```
+- **DELIVERY first** (short, and it frees state upstream), then **own** messages, then **forwarded** ones, oldest first.
 
-- There are 32 jobs in RAM. Any further stored messages stay in flash, and the queue is refilled from the store index in every guard slot.
-- Order: **DELIVERY first** (short, and it frees state upstream), then **OWN_DATA**, then **FORWARD** oldest first.
-- At every pair boundary, a node with a due job and an idle radio starts one exchange.
-
-### One exchange (initiator side)
+### One exchange
 
 ```
-wait 25 ms guard + random(0..3) * 12 ms
-target = job.target, or pick one (section 5); none -> job.waiting, stop
-switch to home_ch(target)
 CAD
-    busy -> job.not_before = now + random(1..4) pairs   (not counted as a retry)
-            back to my home channel; stop
+    busy -> try again in random(1..4) SLOTs (not a retry)
 build the packet:
-    FORWARD   copy the stored DATA, ttl--, append my id, next_hop_id = target
-    OWN_DATA  the stored DATA, next_hop_id = target
+    forward   the stored DATA, ttl--, append my id, next_hop_id = target, as JSON
+    own       the stored DATA, next_hop_id = target, as JSON
     DELIVERY  helper_id, to_id = target, key
-transmit, then RX on the same channel
-wait for the matching ACK / DELIVERY_ACK until pair end - 25 ms
+send, then listen for 1 SLOT
     ACK match:          ack_from == target AND ack_to == me AND key
     DELIVERY_ACK match: ack_from == target AND key
-on match:
-    DATA:     store next_hop = target, state SENT_TO_MESH (handed off); remove the job
-    DELIVERY: delivery done; remove the job
-    neighbour[target]: ok in ack_history
+    any other packet meanwhile is handled as usual
+match:
+    DATA:     store next_hop = target, state SENT_TO_MESH (handed off)
+    DELIVERY: done
 no match:
-    neighbour[target]: fail in ack_history
-    job.retries++
-    retries <= 5 -> job.not_before = now + random(1 .. min(2^retries, 16)) pairs
-    retries >  5 -> add target to job.failed, retries = 0, pick a new target
-back to my home channel, RX
+    retries++
+    retries <= 5 -> next try after random(1 .. min(2^retries, 16)) SLOTs
+    retries >  5 -> DATA: this neighbour failed for this message, pick another
 ```
 
 | Retry k | Backoff before it |
 | --- | --- |
-| 1 | 1–2 pairs |
-| 2 | 1–4 pairs |
-| 3 | 1–8 pairs |
-| 4 | 1–16 pairs |
-| 5 | 1–16 pairs |
+| 1 | 1–2 SLOTs |
+| 2 | 1–4 SLOTs |
+| 3 | 1–8 SLOTs |
+| 4 | 1–16 SLOTs |
+| 5 | 1–16 SLOTs |
 
-A neighbour costs at most 6 TX plus 46 pairs (about 37 s) before the next candidate is tried.
+A neighbour costs at most 6 TX plus 46 SLOTs (about 65 s) before the next candidate is tried.
 
-**DELIVERY retries.** The target of a DELIVERY is fixed (the stored prev_hop), so there is no "next candidate". After 5 failed retries the job waits 60 s and starts a new round of 5. After 5 rounds it gives up and logs it. A dongle that was switched off or moved should not keep a relay transmitting forever.
+**DELIVERY retries.** The target of a DELIVERY is fixed (the stored prev_hop), so there is no "next candidate". After 5 failed retries the DELIVERY waits 60 s and starts a new round of 5. After 5 rounds it gives up. A dongle that was switched off or moved should not keep a relay transmitting forever.
 
-### The receiving side of an exchange
-
-Nothing special happens there. A synced node already sits in RX on its home channel during the data window, and `on_data` / `on_delivery` reply at once (section 6). While a node is away on another node's channel waiting for an ACK, it is deaf on its own channel. Anything sent to it then fails and is retried, which is acceptable.
-
-## 8. End to end
+## 7. End to end
 
 ```mermaid
 sequenceDiagram
@@ -341,94 +249,75 @@ sequenceDiagram
     participant R as Relay 0x0011
     participant H as Helper 0x0001
     participant PC as Laptop
-    P->>D: SEND|2|0x03|lat|lon|alt|acc|ts (USB)
+    P->>D: send (JSON line over USB)
     D->>D: store in flash
-    D-->>P: STATUS|2001-00042|STORED
-    Note over D: waits for a pair, R is the best candidate
-    D->>R: DATA ttl 10, path [2001] on R's channel (ch 4)
-    R->>R: CRC ok, store, seen_add
+    D-->>P: status 2001-00042 STORED
+    Note over D: R is the best candidate
+    D->>R: DATA (JSON) ttl 10, path [2001]
+    R->>R: CRC ok, store
     R->>D: ACK
-    D-->>P: STATUS|2001-00042|SENT_TO_MESH|0x0011
-    R->>H: DATA ttl 9, path [2001, 0011] on H's channel (ch 2)
-    H->>H: store, seen_add
+    D-->>P: status SENT_TO_MESH via 0x0011
+    R->>H: DATA (JSON) ttl 9, path [2001, 0011]
+    H->>H: store
     H->>R: ACK
     H-->>PC: DATA block + JSON (USB)
-    H->>R: DELIVERY to_id 0011 (ch 4)
+    H->>R: DELIVERY to_id 0011
     R->>H: DELIVERY_ACK
-    R->>D: DELIVERY to_id 2001 (ch 6)
+    R->>D: DELIVERY to_id 2001
     D->>R: DELIVERY_ACK
-    D-->>P: STATUS|2001-00042|DELIVERED
+    D-->>P: status DELIVERED
 ```
 
-## 9. Message states
+## 8. Message states
 
-These are kept per message on every node. The dongle also reports them to the phone (`STATUS`, [../docs/usb-protocol.md](../docs/usb-protocol.md)).
+These are kept per message on every node. The dongle also reports them to the phone (`status`, [../docs/usb-protocol.md](../docs/usb-protocol.md)).
 
 | State | Meaning | In flash? |
 | --- | --- | --- |
-| QUEUED | dongle got `SEND`, not yet written | no |
+| QUEUED | dongle got a `send`, not yet written | no |
 | STORED | in flash, not handed off yet | yes |
-| WAITING | stored, no usable neighbour (or not synced yet) | no (a STORED message without a job) |
+| WAITING | stored, no usable neighbour | no (a STORED message waiting) |
 | TRANSMITTING | an exchange for it is in progress | no |
 | SENT_TO_MESH | a next hop ACKed it (handed off) | yes |
 | DELIVERED | DELIVERY received (or this node is the helper) | yes |
-| FAILED | dongle: could not store it (store full / bad SEND); relay: TTL ran out here | yes |
+| FAILED | dongle: could not store it (store full); relay: TTL ran out here | relay only |
 
-The dongle sends each state to the phone once, when it changes: QUEUED as soon as `SEND` arrives (its first `STATUS` tells the app the message ID), STORED after the flash write, then the rest.
+The dongle sends each state to the phone once, when it changes.
 
-## 10. Storage (store before ACK in ~10 ms)
+## 9. Storage
 
-LittleFS is not used. A file write can trigger a 4 KB sector erase that takes 45 ms typical and up to ~400 ms on NOR flash, which would miss the ACK deadline at random. Instead, messages go into a raw flash partition with erased space kept ready in advance.
+Messages live in `Preferences` (the ESP32's NVS flash), so they survive a reboot:
 
-**Partition `mesh`** (data, subtype `0x40`, 256 KB):
-
-| Region | Size | Holds |
+| Kept | Size | Notes |
 | --- | --- | --- |
-| Message log | 128 KB = 32 sectors × 64 records | 2,048 records of 64 B |
-| Seen-set log | 48 KB = 12 sectors × 1,024 keys | 4 B keys; ≥ 11,264 kept after an erase (spec: 10,000) |
+| Stored messages | 50 (dongle 16) | the DATA fields as received, prev_hop, next_hop, state, DELIVERY progress |
+| Seen keys | last 200 | keys of messages already accepted, so a repeat is ACKed but not stored again |
+| Own message counter | 1 | `message_id` never repeats, even after a reboot or `erase` |
 
-**Message record (64 B)**
+- **Store before ACK:** the message is written to flash before the ACK goes out. The seen key is written right after the ACK; until then the stored message itself marks it as seen.
+- **Eviction:** when the store is full, the oldest DELIVERED (or FAILED) message makes room, then the oldest one already handed off. A message that still has to be sent, or that still owes a DELIVERY, is never evicted. If those alone fill the store, the node stops accepting DATA (no ACK), and its neighbours route around it.
+- **Reboot:** stored messages are reloaded and carry on: STORED ones are sent again, owed DELIVERYs go out. That is why a relay rebooted mid-flow loses nothing and the PC shows no duplicate.
+- **Scaling up:** the design target (1,000 messages, 10,000 seen keys per node) needs a raw flash partition with erased space kept ready, so a write never waits for a sector erase. That is the next step after the MVP.
 
-| Offset | Field | Notes |
-| --- | --- | --- |
-| 0 | magic | `0xA5`, written **last**, so a torn write never looks valid |
-| 1 | state | `0xFE` STORED → `0xFC` SENT_TO_MESH → `0xF8` DELIVERED; `0xF0` FAILED |
-| 2 | delivery state | `0xFF` none → `0xFE` DELIVERY owed → `0xFC` done; `0xF8` given up |
-| 3 | own | `0x00` = this node created it, `0xFF` = relayed |
-| 4 | prev_hop | uint16 |
-| 6 | next_hop | uint16, `0xFFFF` until handed off, then programmed once |
-| 8 | length | of the raw DATA |
-| 9 | raw DATA | ≤ 51 B, exactly as received (before this node's ttl--) |
-| 60 | reserved | |
+## 10. Positions and GPS
 
-- **State changes without an erase.** NOR flash can only clear bits (1 → 0). Each state step clears more bits, so a state change programs one byte in place.
-- **Erase ahead.** At least 2 erased sectors are kept ahead of each write head. Erasing happens only in the guard slot, one sector per superframe at most, never during an exchange.
-- **Eviction.** The ring overwrites the oldest sector first. Before a sector is erased, any record in it that is still **STORED** (not handed off) or still owes a DELIVERY is copied to the head. A message this node has not handed off is never evicted. If those records alone fill the store, the node stops accepting DATA (no ACK), and its neighbours route around it.
-- **Seen set.** A RAM mirror of the seen log (48 KB) is checked with a linear scan (~100 µs). It is persisted, so a rebooted node does not accept and forward old messages again.
-- **Boot.** Both logs are scanned (~10 ms). The write head is the start of the erased gap. The RAM index (key → record, state, prev_hop, next_hop) and the seen mirror are rebuilt, and jobs are reloaded for STORED messages and owed DELIVERYs. That is why a relay rebooted mid-flow loses nothing and the PC shows no duplicate.
-- **Own message counter.** `message_id` for own messages lives in NVS (`Preferences`) and is written once per message.
-
-## 11. Positions and GPS
-
-| Node | Position used in HELLO / INI / DATA and for routing |
+| Node | Position used in HELLO / INI and for routing |
 | --- | --- |
-| Relay (balloon, ground) | NEO-6M live fix: `gps_fix = 1`, `position_acc ≈ HDOP × 2.5 m`. Before the first fix: the flash fallback position, `gps_fix = 0`, acc `0xFFFF`. On fix loss (> 10 s): the last GPS position, `gps_fix = 0`. The first fix triggers an INI. |
-| Helper | Its flash position, the same one every node is configured with as `helper position`. |
-| Dongle | DATA carries the **phone's** position from `SEND`. If the phone has no fix: the dongle's stored position if one is set, else 0, with `position_acc = 0xFF`. The stored position is also used for the range filter and tie-breaks. |
+| Relay (balloon, ground) | NEO-6M live fix: `gps_fix = 1`, `position_acc ≈ HDOP × 2.5 m`. Before the first fix: the fixed position from the top of the firmware, `gps_fix = 0`. After a fix is lost (> 10 s): the last GPS position, `gps_fix = 0`. The first fix triggers an INI. |
+| Helper | Its fixed position, the same one every node uses as the helper position. |
+| Dongle | DATA carries the **phone's** position from `send` (0, 0 with `acc` 255 if the phone has no fix). The dongle's fixed position is used only for the demo range filter. |
 
-GPS time fills `gps_time` in INI and the timestamp of messages a relay creates itself (the `send` test command). It is never used for slot timing (section 3).
-
-## 12. Failure behaviour
+## 11. Failure behaviour
 
 | What happens | What the mesh does |
 | --- | --- |
-| Next hop is off | 5 retries with backoff, then the next candidate; no candidate → WAITING; resent when a neighbour reappears (store and forward) |
-| ACK lost | Sender retries; receiver sees a duplicate, does not store it again, ACKs again |
+| Next hop is off | 5 retries with backoff, then the next candidate; no candidate → WAITING; sent when a neighbour reappears (store and forward) |
+| ACK lost | Sender retries; receiver sees a repeat, does not store it again, ACKs again |
 | ACK lost, and the sender already moved to another neighbour | Two copies travel; the helper de-duplicates; DELIVERY returns along the first path; the DELIVERY_ACK match on `ack_from` + key still closes it |
-| Relay reboots mid-flow | Messages and the seen set are in flash; jobs are reloaded at boot; no duplicate at the helper |
+| Relay reboots mid-flow | Messages and seen keys are in flash; sending resumes at boot; no duplicate at the helper |
 | Helper off | Every message waits (STORED / WAITING) at the last relay or the dongle and goes out when the helper's HELLOs return |
-| Node loses its time parent | After 6 silent superframes it is UNSYNCED: RX on ch 0, messages wait, and it re-syncs from the next HELLO it hears |
 | Routing dead end (no neighbour makes progress) | Recovery: any candidate not in `path_history`; TTL stops it after 10 hops |
 | Balloon drifts | Its position is refreshed on every HELLO, and next-hop choices follow it |
 | Store full | No ACK, so upstream nodes keep their copy and route elsewhere; nothing is overwritten that was not handed off |
-| Channel busy | CAD, then a random 1–4 pair wait (not counted as a retry) |
+| Channel busy | CAD, then a random 1–4 SLOT wait (not counted as a retry) |
+| Two senders start at once | Both ACKs go missing; random backoff separates the retries |

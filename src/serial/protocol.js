@@ -1,6 +1,6 @@
-// Phone <-> dongle USB protocol: one '|'-separated text line per message,
-// ending in '\n'. Spec: docs/usb-protocol.md. The phone never builds LoRa
-// packets; the dongle turns SEND into a DATA packet.
+// Phone <-> dongle USB protocol: one JSON object per line, ending in '\n'.
+// Spec: docs/usb-protocol.md. The phone never builds LoRa packets; the
+// dongle turns a "send" into a DATA packet.
 
 export const MESSAGE_STATES = [
   'QUEUED',
@@ -21,47 +21,51 @@ export const FLAG_BITS = {
   'Need water or food': 4,
 };
 
-// DATA position_acc: uint8 metres capped at 254, 0xFF = no fix.
-export const NO_FIX_ACCURACY = 255;
+// DATA position_acc: metres, capped at 254.
 const MAX_ACCURACY = 254;
 
-export const INFO_REQUEST = 'INFO?';
+export const INFO_REQUEST = JSON.stringify({ type: 'info_request' });
 
 export function encodeFlags(needs) {
-  const value = needs.reduce((bits, need) => bits | (1 << FLAG_BITS[need]), 0);
-  return `0x${value.toString(16).toUpperCase().padStart(2, '0')}`;
+  return needs.reduce((bits, need) => bits | (1 << FLAG_BITS[need]), 0);
 }
 
-// SEND|people|flags|lat|lon|alt|acc|unix_time
-// position: { latitude, longitude, altitude, accuracy } or null for no fix.
+// {"type":"send","people":3,"flags":3,"lat":27.68,"lon":85.32,"alt":1300,"acc":10,"time":1761217205}
+// position: { latitude, longitude, altitude, accuracy } or null for no fix,
+// which sends lat / lon / alt / acc as null.
 export function encodeSend({ people, needs, position, time }) {
-  const unix = Math.floor(time.getTime() / 1000);
-  const fields = position
-    ? [
-        position.latitude.toFixed(6),
-        position.longitude.toFixed(6),
-        Math.round(position.altitude),
-        position.accuracy == null ? MAX_ACCURACY : Math.min(MAX_ACCURACY, Math.max(0, Math.round(position.accuracy))),
-      ]
-    : ['0.000000', '0.000000', 0, NO_FIX_ACCURACY];
-  return ['SEND', people, encodeFlags(needs), ...fields, unix].join('|');
+  const accuracy =
+    position?.accuracy == null ? MAX_ACCURACY : Math.min(MAX_ACCURACY, Math.max(0, Math.round(position.accuracy)));
+  return JSON.stringify({
+    type: 'send',
+    people,
+    flags: encodeFlags(needs),
+    lat: position ? Number(position.latitude.toFixed(6)) : null,
+    lon: position ? Number(position.longitude.toFixed(6)) : null,
+    alt: position ? Math.round(position.altitude) : null,
+    acc: position ? accuracy : null,
+    time: Math.floor(time.getTime() / 1000),
+  });
 }
 
 // Returns null for anything that isn't a protocol line (e.g. firmware logs
-// on the same port), so those are ignored.
+// on the same port, which start with '#' or '@'), so those are ignored.
 export function parseLine(raw) {
-  const parts = raw.trim().split('|');
-  switch (parts[0]) {
-    case 'STATUS': {
-      const [, messageId, state, nextHop] = parts;
-      if (!messageId || !MESSAGE_STATES.includes(state)) return null;
-      return { type: 'status', messageId, state, nextHop: nextHop || null };
-    }
-    case 'INFO': {
-      const nodes = parseInt(parts[2], 10);
-      if (Number.isNaN(nodes)) return null;
-      return { type: 'info', nodesInRange: nodes };
-    }
+  const text = raw.trim();
+  if (!text.startsWith('{')) return null;
+  let msg;
+  try {
+    msg = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  switch (msg?.type) {
+    case 'status':
+      if (typeof msg.id !== 'string' || !MESSAGE_STATES.includes(msg.state)) return null;
+      return { type: 'status', messageId: msg.id, state: msg.state, nextHop: msg.next_hop ?? null };
+    case 'info':
+      if (!Number.isInteger(msg.nodes)) return null;
+      return { type: 'info', nodesInRange: msg.nodes };
   }
   return null;
 }

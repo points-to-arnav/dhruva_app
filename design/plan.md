@@ -3,8 +3,8 @@
 A modular LoRa disaster-relief mesh. A trapped person needs only a **phone + a USB LoRa dongle**: they pick what they need, press SEND, and the mesh of balloon and ground nodes carries the message hop by hop to a **Helper** (the rescue base), which confirms delivery all the way back.
 
 Companion documents:
-- [packet-design.md](packet-design.md): on-air packet formats (rev 5)
-- [algorithm-design.md](algorithm-design.md): MAC, time sync, neighbours, routing, retries, storage
+- [packet-design.md](packet-design.md): on-air packet formats (rev 4)
+- [algorithm-design.md](algorithm-design.md): channel access, neighbours, routing, retries, storage
 - [../docs/usb-protocol.md](../docs/usb-protocol.md): phone ↔ dongle USB protocol (already implemented by the web app in this repo)
 
 ## 1. Goal
@@ -66,23 +66,22 @@ Every module:
 
 | Signal | GPIO | Notes |
 | --- | --- | --- |
-| SX1278 DIO0 | 2 | RxDone / CadDone interrupt. GPIO2 is a strapping pin, see the note below |
+| SX1278 DIO0 | 2 | GPIO2 is a strapping pin, see the note below |
 | SX1278 RST | 3 | |
 | SX1278 MOSI | 4 | SPI |
 | SX1278 MISO | 5 | SPI |
 | SX1278 SCK | 6 | SPI |
 | SX1278 NSS | 7 | SPI chip select |
 | NEO-6M TX → ESP RX | 20 | UART1 RX, 9600 baud (relays only; ESP TX to the GPS is not needed) |
-| Status LED | 8 | onboard, active low |
 
 - **GPIO2 is a strapping pin** on the C3. DIO0 is an input, so it normally works, but if a board fails to boot with the LoRa module attached, move DIO0 to GPIO10 (free and not strapping).
-- **DIO1 is not wired.** The CAD result is read from the SX1278's IRQ register over SPI instead (section 5).
+- **No interrupts are used.** The firmware polls the radio, and reads the CAD result from the SX1278's IRQ register over SPI, so DIO1 is not needed.
 - On a table: TX power **2–5 dBm**, modules **≥ 1 m apart**. Full power at 30 cm overloads the receiver and corrupts packets.
 - If a board gets no power over a C-to-C cable, the cable or board is missing the CC pull-down resistors. Use an OTG adapter with an A-to-C cable.
 
 ### Radio
 
-SF 9, BW 125 kHz, CR 4/5, sync word `0x12`, preamble 8, explicit header, hardware CRC on, PA_BOOST. There are 8 channels at 200 kHz spacing from 433.175 MHz: ch 0 is control, ch 1–7 are data (packet design section 7). This stays inside **433.05–434.79 MHz**, India's licence-exempt low-power band. The power, bandwidth and duty-cycle limits for that band must be checked before any field deployment: the older 2015 notification capped ERP at 10 mW.
+One channel, **433.175 MHz**, for every packet. SF 9, BW 125 kHz, CR 4/5, sync word `0x12`, preamble 8, explicit header, hardware CRC on, PA_BOOST. This stays inside **433.05–434.79 MHz**, India's licence-exempt low-power band. The power, bandwidth and duty-cycle limits for that band must be checked before any field deployment: the older 2015 notification capped ERP at 10 mW.
 
 ## 4. Toolchain
 
@@ -90,69 +89,62 @@ SF 9, BW 125 kHz, CR 4/5, sync word `0x12`, preamble 8, explicit header, hardwar
 | --- | --- |
 | IDE | **Arduino IDE** |
 | Board package | esp32 by Espressif **3.x**, board **ESP32C3 Dev Module** |
-| Board settings | USB CDC On Boot: **Enabled** (so `Serial` is the native USB port), Flash Size: 4 MB |
-| Libraries | **LoRa by Sandeep Mistry** (`LoRa.h`) and `SPI.h`; nothing else to install |
-| GPS | own NMEA reader (GGA + RMC) in `gps.cpp`, no GPS library |
-| Config storage | `Preferences` (NVS), built in |
-| Message storage | raw flash partition via `esp_partition_*`, built in |
-| Sketch | `firmware/firmware.ino`; the module is picked in `firmware/role.h` |
-
-`firmware/partitions.csv` sits next to the sketch, so the esp32 core picks it up automatically:
-
-```
-# Name,   Type, SubType, Offset,   Size
-nvs,      data, nvs,     0x9000,   0x5000
-phy_init, data, phy,     0xe000,   0x1000
-factory,  app,  factory, 0x10000,  0x200000
-mesh,     data, 0x40,    0x210000, 0x40000
-```
+| Board settings | USB CDC On Boot: **Enabled** (so `Serial` is the native USB port), Flash Size: 4 MB, default partition scheme |
+| Libraries | **LoRa by Sandeep Mistry** (`LoRa.h`), **ArduinoJson by Benoit Blanchon** (v7) and `SPI.h`; `Preferences.h` comes with the esp32 core |
+| GPS | a small NMEA reader (`$GPGGA`) in the firmware, no GPS library |
+| Storage | `Preferences` (NVS): stored messages, seen messages, own message counter |
+| Sketch | `firmware/firmware.ino`, one file |
 
 ## 5. Firmware
 
-**One firmware for every module.** The module is picked at compile time in `role.h`, with exactly one flag set to 1:
+**One file, `firmware/firmware.ino`, for every module.** The top of the file is all a team member edits before flashing:
 
 ```c
-#define IS_DONGLE 0   // plugged into the phone: originates SOS messages, never relays
-#define IS_RELAY  1   // balloon or ground node (which one: `set role` over USB)
-#define IS_HELPER 0   // rescue base: final stop, prints to the PC, sends DELIVERY
+// 1. Which module is this? Set exactly one to 1.
+#define IS_DONGLE 0
+#define IS_RELAY  1
+#define IS_HELPER 0
+
+// 2. This module's ID and position (one block per module type)
+#define MY_ID 0x0011
+#define RELAY_IS_BALLOON 1                             // 0 = ground node
+const double MY_LAT = 27.716000, MY_LON = 85.320000;  // used until the GPS has a fix
+
+// 3. The network: the same on every module
+#define HELPER_ID 0x0001
+const double HELPER_LAT = 27.752000, HELPER_LON = 85.320000;
+#define DEMO_RANGE_KM 0
+#define TX_POWER 5
+#define HELLO_INTERVAL_MS 10000UL
 ```
 
-The mesh code is the same on every module. The flags only switch the role-specific parts: the phone protocol (dongle), the GPS (relay), the DATA printout and time root (helper), and whether DATA is accepted and forwarded.
+The mesh code is the same on every module. The flags only switch the role-specific parts: the phone protocol (dongle), the GPS (relay), the DATA printout (helper), and whether DATA is accepted and forwarded. The rest of the file, in order:
 
-```
-firmware/
-  firmware.ino     setup() + loop()
-  role.h           IS_DONGLE / IS_RELAY / IS_HELPER, role IDs, default node ID
-  pins.h           wiring (section 3)
-  partitions.csv   adds the 256 KB `mesh` partition
-  mesh_config.*    NVS config, own message counter
-  cli.*            USB command line (and routes phone lines to phone.*)
-  radio.*          LoRa library wrapper: DIO0 interrupt, channel switch, CAD
-  packet.*         serialize / deserialize, crc8, airtime
-  timesync.*       superframe clock, parent choice
-  mac.*            control / data / guard windows, one exchange per pair, retries
-  neighbor.*       neighbour table, states, range filter, dongle candidates
-  routing.*        next-hop selection
-  txq.*            jobs, backoff state, refill from flash
-  store.*          raw-partition message log, seen set, boot scan
-  mesh.*           receive dispatch, store before ACK, DELIVERY, own messages
-  geo.*            distance, progress to the Helper
-  timeutil.*       Unix time <-> UTC
-  mesh_log.*       readable text + @JSON lines
-  phone.*          dongle: SEND / STATUS / INFO
-  gps.*            relay: NEO-6M NMEA reader, INI on first fix
-  report.*         helper: DATA block to the PC
-```
-
-The code style is plain C-style modules (structs + functions, no class hierarchies) with a single main loop and no extra FreeRTOS tasks:
+| Section | What it does |
+| --- | --- |
+| Wiring, radio, packets, timing, sizes | constants from sections 3 and 4, packet design and algorithm design |
+| Types, state | packet structs, neighbour table, message store |
+| Packet encode / decode | DATA as JSON (ArduinoJson); the binary packets with explicit little-endian fields, CRC8, length checks |
+| Radio | `LoRa` setup, send, polled receive, CAD |
+| Neighbours | HELLO / INI handling, HEARD / ACTIVE / STALE, routing order |
+| Message store | messages and seen keys in `Preferences`, eviction |
+| Status to the phone | JSON `status` / `info` lines (dongle) |
+| Helper printout | the DATA block for the PC |
+| Receiving | store before ACK, DELIVERY handling |
+| Sending | listen before talk, ACK wait, retries and backoff, next-hop choice |
+| Beacons | HELLO / INI from relays and the Helper |
+| GPS | NEO-6M reader (relays) |
+| USB | phone protocol (dongle) and test commands |
+| `setup()` / `loop()` | |
 
 ```c
 void loop() {
-    cli_poll();                       // CLI, and on the dongle the phone protocol
-    if (radio_poll(f)) mesh_on_frame(f);  // DIO0 flag -> receive dispatch
-    gps_poll();                       // relay only
-    mesh_tick(now);                   // time sync, control / data / guard windows, exchanges
-    phone_tick(now);                  // dongle only: INFO when the node count changes
+  usbTick();                                 // phone lines (dongle) and test commands
+  if (radioReceive(...)) handlePacket(...);  // polled receive
+  gpsTick();                                 // relays only
+  beaconTick();                              // HELLO / INI, relays and Helper
+  doWork();                                  // send one due message: DELIVERY, own, forward
+  secondTick();                              // neighbours going quiet, waiting messages, INFO
 }
 ```
 
@@ -160,32 +152,24 @@ void loop() {
 
 | Need | How |
 | --- | --- |
-| Setup | `SPI.begin(6, 5, 4, 7); LoRa.setSPI(SPI); LoRa.setPins(7, 3, 2); LoRa.begin(433.175E6);`, then SF, BW, CR, sync word, preamble, `enableCrc()`, `setTxPower()` |
-| Receive | Not `onReceive()`, which reads SPI inside the interrupt. Instead, an own `IRAM_ATTR` interrupt on DIO0 records only a flag and `esp_timer_get_time()`. The loop then calls `LoRa.parsePacket()`, reads the bytes and `packetRssi()` / `packetSnr()`, and calls `LoRa.receive()` again. `parsePacket()` is called only after the flag, because on an idle continuous RX it would switch the radio to single RX. |
-| Transmit | `beginPacket()`, `write()`, blocking `endPacket()` (≤ 330 ms), then `receive()`. The TX start time is taken just before `endPacket()`, for `sf_offset_ms`. |
-| Channel switch | `LoRa.idle(); LoRa.setFrequency(f);` then back to RX or on to CAD. Skipped if already on that channel. |
-| CAD | Map DIO0 to CadDone and put the radio in CAD mode (register writes over the same SPI bus), wait for DIO0, read `RegIrqFlags` (`0x12`: CadDone `0x04`, CadDetected `0x01`), clear the flags, then `receive()` (which maps DIO0 back to RxDone). |
+| Setup | `SPI.begin(6, 5, 4, 7); LoRa.setPins(7, 3, 2); LoRa.begin(433175000);`, then SF, BW, CR, preamble, sync word, `enableCrc()`, `setTxPower()` |
+| Receive | Poll `LoRa.parsePacket()` every loop, read the bytes, `packetRssi()`, `packetSnr()`. No callbacks or interrupts. |
+| Transmit | `beginPacket()`, `write()`, `endPacket()`, which waits until the packet is out (≤ 330 ms). |
+| CAD | Put the radio in CAD mode with two register writes over the same SPI bus, poll `RegIrqFlags` (`0x12`: CadDone `0x04`, CadDetected `0x01`), clear the flags, `LoRa.idle()`. The next `parsePacket()` receives again. |
 
-### USB command line (every module)
+### USB
 
-These are text commands, one per line, so any serial monitor works. Config is saved in NVS.
+On the **dongle**, the port carries the phone protocol as JSON lines (`send`, `info_request` in; `status`, `info` out, see [usb-protocol.md](../docs/usb-protocol.md)). A team member can type the same JSON line into the serial monitor to test without the phone, e.g. `{"type":"send","people":2,"flags":3,"lat":27.68,"lon":85.32,"alt":1300,"acc":10,"time":1761217205}`.
+
+On every module, three test commands:
 
 ```
-show cfg | nbr | msgs | stats | sync
-set id 0x0011
-set role balloon|ground                 # relays only
-set helper 0x0001 27.752000 85.320000   # helper ID + position
-set pos 27.716000 85.320000 1300        # fallback / fixed position
-set txp 3                               # dBm
-set range 5                             # DEMO_RANGE_KM, 0 = off
-set sf_slots 25   set ctrl_slots 4      # superframe layout, the same on every node
-set txlat 0                             # TX_LATENCY_US for time sync
-save | reboot | erase store
-send <people> <flags_hex>               # inject a test message (not on the Helper)
+status                      neighbours and stored messages
+send <people> <flags_hex>   create a test message (dongle and relay)
+erase                       clear stored messages and seen keys (keeps the message counter)
 ```
 
-- **Dongle:** the same port carries the phone protocol (`SEND|…`, `INFO?` in; `STATUS|…`, `INFO|…` out, see [usb-protocol.md](../docs/usb-protocol.md)). Phone lines are uppercase and contain `|`; CLI commands are lowercase words. No log line starts with `STATUS` or `INFO`, so the app ignores them.
-- `Serial.setTxTimeoutMs(0)`: with native USB, `Serial.print` can block when nothing is reading, which would freeze the radio timing.
+Every other line the firmware prints starts with `#` or `@`, never `{`, so the phone app ignores it. `Serial.setTxTimeoutMs(0)` keeps a module from stalling when nothing reads its USB port.
 
 ### Logs
 
@@ -195,7 +179,7 @@ Two kinds go out on the same port.
 
 ```
 ============== DATA RECEIVED ==============
-type / version : DATA / v1 (0x12)
+type           : DATA (JSON, 177 bytes)
 message id     : 2001-00042
 source         : 0x2001 (dongle)
 destination    : 0x0001 (helper)
@@ -218,7 +202,9 @@ timestamp      : 2025-10-23 11:00:05 UTC (1761217205)
 -------------------------------------------
 path           : 0x2001 -> 0x0011 (2 nodes)
 last hop       : 0x0011, RSSI -71 dBm, SNR 8.5 dB
-crc8           : OK
+crc            : OK (LoRa CRC16)
+-------------------------------------------
+json           : {"t":"DATA","src":"2001","mid":42,"dst":"0001","nh":"0001","ttl":9,...}
 ===========================================
 ```
 
@@ -227,14 +213,13 @@ The firmware prints UTC; the PC adds its own receive time.
 **JSON lines starting with `@`**, for the PC dashboard and the live simulation:
 
 ```
-@{"t":12345,"node":"0x0011","ev":"data_rx","key":"2001-00042","from":"0x2001","rssi":-71,"snr":8.5,"ch":4}
+@{"t":12345,"node":"0x0011","ev":"data_rx","key":"2001-00042","from":"0x2001","rssi":-71,"snr":8.5,"ttl":10,"hops":0}
 @{"t":12346,"node":"0x0011","ev":"ack_rx","key":"2001-00042","from":"0x0001","retries":1}
 @{"t":12350,"node":"0x2001","ev":"retry","key":"2001-00042","to":"0x0011","n":2}
 @{"t":12360,"node":"0x2001","ev":"waiting","key":"2001-00042"}
 @{"t":12400,"node":"0x0001","ev":"delivered","key":"2001-00042","path":["0x2001","0x0011","0x0001"]}
-@{"t":12500,"node":"0x0011","ev":"sync","parent":"0x0001","depth":1,"err_ms":3}
-@{"t":13000,"node":"0x0011","ev":"nbr","id":"0x0001","state":"ACTIVE","rssi":-60,"snr":9.0}
-@{"t":20000,"node":"0x0011","ev":"stats","rx":120,"tx":40,"crc_fail":2,"dup":1,"nbr_active":2}
+@{"t":13000,"node":"0x0011","ev":"nbr","id":"0x0001","state":"ACTIVE","why":"hellos/snr","rssi":-60,"snr":9.0}
+@{"t":13100,"node":"0x2001","ev":"msg_state","key":"2001-00042","state":"DELIVERED"}
 ```
 
 They feed the simulation's panels: the per-message log (path, timestamp, status, route), each node's RSSI, and network status (average hop count, message success rate, average RSSI, total / active / down nodes).
@@ -247,7 +232,7 @@ They feed the simulation's panels: the per-message log (path, timestamp, status,
 | Infra nodes | 1–5 | ~50 balloons at 5 km spacing, zone ~1,000 km² (radius ~18 km, ~4 hops) |
 | Dongles | 1–2 | up to 10,000 registered |
 | Helper capacity | | ~1,000–1,500 messages / hour. Each message costs ~0.8 s of Helper channel time (DATA + ACK + DELIVERY + DELIVERY_ACK). Bursts above that wait in the mesh (STORED / WAITING); they are not lost. |
-| Storage per node | | 2,048 messages + ≥ 10,000 seen keys (algorithm design section 10) |
+| Storage per node | 50 messages (dongle 16), 200 seen keys | 1,000 messages, 10,000 seen keys (needs the raw flash store, algorithm design section 9) |
 
 ## 7. Milestones
 
@@ -255,31 +240,28 @@ Each milestone has a test that says it is done.
 
 | # | Build | Done when |
 | --- | --- | --- |
-| M0 | Bring-up: SPI, USB command line, NVS config | SX1278 version register reads `0x12`; `set` / `show` / `save` survive a reboot |
-| M1 | `packet` module + host tests | All 6 types round-trip; CRC matches the test vectors; the app and the sim use the same vectors |
-| M2 | Radio ping on ch 0, then channel switching | 1,000 packets A ↔ B; measured airtime within ±5 ms of the table; RSSI / SNR logged; A and B meet on each of ch 1–7 |
-| M3 | Superframe + time sync (one channel) | Relay and dongle report `sync` with `\|err\| < 10 ms`; `TX_LATENCY_US` measured |
-| M4 | Home channels + DATA / ACK / retry | Pull B's antenna → A retries with backoff; two exchanges on different channels in the same pair both succeed |
-| M5 | Flash store + seen set | Reboot B → the message is still in B; a duplicate DATA gets an ACK but isn't stored again |
-| M6 | HELLO, neighbour table, geographic forwarding | A → B → C with no configured route: A picks B because B is closer to the Helper (C) |
-| M7 | DELIVERY, phone protocol on the dongle, Helper output | **Phone → dongle → Helper → laptop works, the app shows DELIVERED**; Act 1 passes 10 times in a row. **Demo ready.** |
-| M8 | Relay with GPS + range filter | Act 2 passes 10 times in a row; the relay's HELLO carries its GPS position once it has a fix |
-| M9 | Redundancy + failure testing | Diamond A–B–D–C (C = Helper): turn B off and the message still reaches C via D. Measure delivery rate, retry count, hops, duplicates, delivery time, lost messages under node failure, reboot, packet loss, moving nodes, simultaneous messages. |
-
-A cheap 24 MHz USB logic analyzer makes M3 an afternoon: toggle a GPIO at each superframe start on two boards and compare.
+| M0 | Bring-up: SPI, radio, USB | `LoRa.begin()` succeeds; `status` answers on every module |
+| M1 | Packet encode / decode | All 6 types round-trip (DATA as JSON); CRC matches the test vectors; the app and the sim use the same vectors |
+| M2 | Radio ping | 1,000 packets A ↔ B; measured airtime within ±5 ms of the table; RSSI / SNR logged |
+| M3 | DATA / ACK / retry with CAD | Pull B's antenna → A retries with backoff; two senders at once both get through |
+| M4 | Store + seen keys | Reboot B → the message is still in B (`status`); a duplicate DATA gets an ACK but isn't stored again |
+| M5 | HELLO, neighbour table, geographic forwarding | A → B → C with no configured route: A picks B because B is closer to the Helper (C) |
+| M6 | DELIVERY, phone protocol on the dongle, Helper output | **Phone → dongle → Helper → laptop works, the app shows DELIVERED**; Act 1 passes 10 times in a row. **Demo ready.** |
+| M7 | Relay with GPS + range filter | Act 2 passes 10 times in a row; the relay's HELLO carries its GPS position once it has a fix |
+| M8 | Redundancy + failure testing | Diamond A–B–D–C (C = Helper): turn B off and the message still reaches C via D. Measure delivery rate, retry count, hops, duplicates, delivery time, lost messages under node failure, reboot, packet loss, moving nodes, simultaneous messages. |
 
 ## 8. Demo
 
-All modules have antennas on, TX power 2–5 dBm, and are ≥ 1 m apart. Power the Helper (and relay) on first. A dongle needs one HELLO (≤ 10 s with the demo superframe) to sync, so check that the app shows nodes in range before pressing SEND. A message sent earlier just waits (WAITING) and goes out on its own.
+All modules have antennas on, TX power 2–5 dBm, and are ≥ 1 m apart. Power the Helper (and relay) on first. The dongle can use a node as soon as it hears one HELLO (≤ 12 s with `HELLO_INTERVAL_MS` 10 s), so check that the app shows nodes in range before pressing SEND. A message sent earlier just waits (WAITING) and goes out on its own. A relay forwards only through ACTIVE neighbours, which takes 3 HELLOs (~30 s) after power-on.
 
-**Act 1: dongle + Helper** (`range 0` on both)
+**Act 1: dongle + Helper** (`DEMO_RANGE_KM 0` on both)
 
 1. Send from the app → the laptop prints the DATA block; the app shows DELIVERED.
 2. Power off the Helper → send → the app shows WAITING.
-3. Power the Helper back on → its HELLOs return, the dongle re-syncs, the message goes through → DELIVERED (store and forward).
-4. Reboot the Helper right after it prints a message → no duplicate on the laptop when the dongle retries (the seen set survives the reboot).
+3. Power the Helper back on → its HELLOs return, the message goes through → DELIVERED (store and forward).
+4. Reboot the Helper right after it prints a message → no duplicate on the laptop when the dongle retries (the seen keys survive the reboot).
 
-**Act 2: through the relay** (config only, no reflash): `range 5` on all three, then `set pos` with the positions below, `save`, `reboot`.
+**Act 2: through the relay**: set `DEMO_RANGE_KM 5` and the positions below at the top of the file, and flash all three.
 
 | Module | ID | Position (placeholder; swap in the simulation's Nepal 2024 flood-area coordinates) |
 | --- | --- | --- |
@@ -287,20 +269,21 @@ All modules have antennas on, TX power 2–5 dBm, and are ≥ 1 m apart. Power t
 | Relay | `0x0011` | 27.716000, 85.320000 (4.0 km from the dongle) |
 | Helper | `0x0001` | 27.752000, 85.320000 (4.0 km from the relay, 8.0 km from the dongle → filtered) |
 
+These are the defaults in the file. The relay uses its GPS position once it has a fix, so keep its GPS indoors (no fix) for the demo, or the range filter sees its real position.
+
 1. Send from the app → the laptop shows `path: 0x2001 -> 0x0011 (2 nodes)`.
 2. Power off the relay → WAITING → power it on → DELIVERED.
 3. Reboot the relay mid-flow → the message survives in flash, no duplicate on the laptop.
 
 Powering the Helper off also closes its serial port on the laptop, so the laptop-side reader must reconnect on its own.
 
-Expected latency with nothing unplugged: one exchange per hop, at the next free pair. That is about 1–3 s per hop with the demo superframe, plus up to one superframe if the dongle has just synced.
+Expected latency with nothing unplugged: about 1–1.5 s per hop (a JSON DATA takes ~0.9–1.2 s on air), plus backoff if a packet is lost.
 
 ## 9. V1 success criteria
 
 - [ ] 3–5 nodes operate independently
 - [ ] Nodes discover nearby nodes automatically and maintain neighbour information
 - [ ] Nodes know approximate positions (GPS or fallback) and the Helper's position
-- [ ] Every node keeps the superframe clock from the Helper, indoors, with no GPS
 - [ ] Geographic forwarding works
 - [ ] Messages are stored before ACK, and survive a node reboot
 - [ ] Duplicate messages are suppressed
@@ -313,7 +296,7 @@ Expected latency with nothing unplugged: one exchange per hop, at the next free 
 
 ## 10. Out of scope for V1 (V2+)
 
-Custom PCB, solar power, drone integration, LTE / 4G, sensors, OLED / e-paper, dynamic or multiple Helpers, authentication, encryption, full A*, dynamic spreading factor, message inventory exchange ("I have / I need"), advanced congestion control, sleep and power optimisation, sophisticated routing recovery.
+Custom PCB, solar power, drone integration, LTE / 4G, sensors, OLED / e-paper, dynamic or multiple Helpers, authentication, encryption, full A*, dynamic spreading factor, message inventory exchange ("I have / I need"), advanced congestion control, sleep and power optimisation, sophisticated routing recovery, multi-channel (TDM + FDM) channel access.
 
 ## 11. Decisions that change the original plan
 
@@ -323,14 +306,15 @@ Custom PCB, solar power, drone integration, LTE / 4G, sensors, OLED / e-paper, d
 | Free-text message | `people` + `flags` bitfield | Fixed-size DATA, shorter airtime |
 | Node IDs 1 byte; SYNC packet type | uint16 IDs by role range; HELLO does the upkeep | packet v2 |
 | SF 7–10 to be tested | SF 9 fixed | packet v2 |
-| CSMA for the demo, hybrid optional (TX RX plan) | **Hybrid TDM + FDM is the only MAC** | Chosen for real-world scale (balloons all hear each other); the demo exercises the same code path |
-| `sync_depth` in `role_flags` bits 4–6 | Bits 4–7, 15 = unsynced | The clock reaches 14 hops, so it covers TTL 10 |
-| No GPS in the demo (TX RX plan) | NEO-6M on relays, flash fallback until the first fix; dongle and Helper without GPS | Team hardware decision |
-| PlatformIO + RadioLib (TX RX plan) | Arduino IDE + Sandeep Mistry LoRa | Team toolchain; the gaps (no DIO1, CAD result, interrupt-safe RX) are covered in section 5 |
-| A codebase with the role as a config value (TX RX plan) | One firmware; the role is a compile-time flag in `role.h` (`IS_DONGLE` / `IS_RELAY` / `IS_HELPER`) | Each board's role is fixed by its hardware (phone port, GPS, PC link); balloon vs ground stays a USB setting |
-| TX RX plan pins (with DIO1) | Team wiring in section 3, no DIO1 | Boards already wired |
-| Phone frame `SEND\|app_id\|…` / `ST\|…` (TX RX plan §13a) | The protocol the web app already speaks: `SEND\|people\|flags\|lat\|lon\|alt\|acc\|ts`, `STATUS`, `INFO` | The app is built; the phone supplies the victim position |
+| Hybrid TDM + FDM after the demo (TX RX plan) | One channel with CAD (packet v2 rev 4) | Kept basic: no time sync and no channel hopping. Multi-channel stays a V2 option. |
+| 433.000 MHz (packet v2) | 433.175 MHz | A 125 kHz channel centred on 433.000 MHz reaches below the 433.05 MHz band edge |
+| No GPS in the demo (TX RX plan) | NEO-6M on relays, fixed position until the first fix; dongle and Helper without GPS | Team hardware decision |
+| PlatformIO + RadioLib (TX RX plan) | Arduino IDE + Sandeep Mistry LoRa, one `.ino` file | Team toolchain, kept basic |
+| Config over USB, stored in flash (packet v2) | Role, ID and positions are constants at the top of the file | Kept basic: edit and flash, like the team's test sketch |
+| Raw flash partition for messages (TX RX plan) | `Preferences` (NVS), 50 messages and 200 seen keys | No custom partition table; enough for the MVP |
+| TX RX plan pins (with DIO1) | Team wiring in section 3, no DIO1, no interrupts | Boards already wired; polling is simpler |
+| Phone frame `SEND\|app_id\|…` / `ST\|…` (TX RX plan §13a) | JSON lines both ways: `send` / `info_request` from the website, `status` / `info` from the dongle | Team decision; the phone supplies the victim position |
+| Binary DATA (packet v2) | DATA as JSON over LoRa; the other packets stay binary | Team decision: readable on any receiver; costs ~3–4x airtime, so `SLOT` is 1.3 s |
 | DELIVERY_ACK `ack_to` = DELIVERY sender | `ack_to` = stored next_hop; matched on `ack_from` + key | DELIVERY has no sender field (packet design section 6) |
 | DATA accepted by the helper named in `destination_id` | Any Helper accepts any DATA | V1 has one Helper; a message that reaches a rescue base is delivered |
-| — | STALE probation, recovery beyond the 4-neighbour set, DELIVERY retry rounds, store relocation before erase | Real-world gaps found while detailing the algorithm (algorithm design sections 4, 5, 7, 10) |
-
+| — | STALE probation, DELIVERY retry rounds | Real-world gaps found while detailing the algorithm (algorithm design sections 3, 6) |

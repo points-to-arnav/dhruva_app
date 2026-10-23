@@ -1,8 +1,8 @@
 const DONGLE_ID = '2001';
 const NEXT_HOP = '0x0011';
 
-// Pretends to be the dongle firmware: answers INFO? and walks each SEND
-// through the v2 message states. With no infra node heard, a message sits
+// Pretends to be the dongle firmware: answers info requests and walks each
+// send through the message states, as JSON lines. With no infra node heard, a message sits
 // in WAITING until one shows up (demo script steps 2-3). Open the app with
 // ?mock to use it.
 export class MockLink {
@@ -44,11 +44,17 @@ export class MockLink {
 
   async writeLine(line) {
     if (!this.connected) throw new Error('Dongle not connected');
-    if (line === 'INFO?') {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (msg.type === 'info_request') {
       this.later(50, () => this.sendInfo());
       return;
     }
-    if (!line.startsWith('SEND|')) return;
+    if (msg.type !== 'send') return;
     this.counter += 1;
     const id = `${DONGLE_ID}-${String(this.counter).padStart(5, '0')}`;
     this.later(150, () => this.status(id, 'QUEUED'));
@@ -65,7 +71,7 @@ export class MockLink {
 
   transmit(id) {
     this.later(1000, () => this.status(id, 'TRANSMITTING'));
-    this.later(2500, () => this.status(id, `SENT_TO_MESH|${NEXT_HOP}`));
+    this.later(2500, () => this.status(id, 'SENT_TO_MESH', NEXT_HOP));
     this.later(6000, () => this.status(id, 'DELIVERED'));
   }
 
@@ -75,11 +81,15 @@ export class MockLink {
   }
 
   sendInfo() {
-    if (this.connected) this.emit({ type: 'line', line: `INFO|-|${this.nodes}` });
+    this.reply({ type: 'info', battery: null, nodes: this.nodes });
   }
 
-  status(id, rest) {
-    if (this.connected) this.emit({ type: 'line', line: `STATUS|${id}|${rest}` });
+  status(id, state, nextHop) {
+    this.reply({ type: 'status', id, state, ...(nextHop && { next_hop: nextHop }) });
+  }
+
+  reply(msg) {
+    if (this.connected) this.emit({ type: 'line', line: JSON.stringify(msg) });
   }
 
   emit(event) {
