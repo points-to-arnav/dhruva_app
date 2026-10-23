@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
-import { FAKE_STATUS_PROGRESS, FAKE_STEP_DELAY_MS } from '../config';
+import { FAKE_STATUS_PROGRESS, FUNCTION_DELAY_XYZ } from '../config';
 import { useBattery } from '../hooks/useBattery';
 import { usePosition } from '../hooks/usePosition';
 import { createLink, encodeSend, INFO_REQUEST, parseLine } from '../serial';
@@ -14,7 +14,7 @@ const INFO_DELAY_MS = 300;
 const FAKE_STEPS = [{ state: 'STORED' }, { state: 'SENT_TO_MESH', nextHop: '0x0011' }, { state: 'DELIVERED' }];
 
 function fakeStepDelay() {
-  const { min, max } = FAKE_STEP_DELAY_MS;
+  const { min, max } = FUNCTION_DELAY_XYZ;
   return min + Math.random() * (max - min);
 }
 

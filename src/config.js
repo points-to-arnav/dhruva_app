@@ -15,7 +15,7 @@ export const DEMO_POSITION = {
 // and STATUS lines from the dongle are ignored. Set to false to follow the
 // dongle's real STATUS replies. Not used with ?mock, which simulates its own.
 export const FAKE_STATUS_PROGRESS = true;
-export const FAKE_STEP_DELAY_MS = { min: 2000, max: 3000 };
+export const FUNCTION_DELAY_XYZ = { min: 2000, max: 3000 };
 
 // The ESP32-C3's built-in USB Serial/JTAG controller.
 export const DONGLE_USB_FILTER = { usbVendorId: 0x303a, usbProductId: 0x1001 };
