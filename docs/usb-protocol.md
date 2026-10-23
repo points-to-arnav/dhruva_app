@@ -4,7 +4,7 @@ The phone app (a web page in Chrome) and the dongle (ESP32-C3 Super Mini, built-
 
 When the app opens the port it sets **DTR and RTS both low**. On the C3's USB Serial/JTAG, RTS high holds the chip in reset and DTR high pulls the boot pin, so the app keeps both low. If the chip resets anyway when the port opens, the app asks `INFO?` 300 ms after opening; reply once you've booted.
 
-The phone never builds or reads LoRa packets. The dongle turns `SEND` into a DATA packet (packet_v2, section 3) and reports its progress with `STATUS`.
+The phone never builds or reads LoRa packets. The dongle turns `SEND` into a DATA packet ([packet design](../design/packet-design.md), section 3) and reports its progress with `STATUS`.
 
 Any line that doesn't start with a known keyword is ignored by the app, so firmware debug prints on the same port are harmless.
 
@@ -47,7 +47,7 @@ STATUS|2001-00042|SENT_TO_MESH|0x0011
 ```
 
 - `message_id`: source ID as 4 hex digits, `-`, message_id as 5 decimal digits (same as the helper's PC output).
-- `state`: one of `QUEUED`, `STORED`, `TRANSMITTING`, `SENT_TO_MESH`, `DELIVERED`, `WAITING`, `FAILED` (packet_v2, section 10).
+- `state`: one of `QUEUED`, `STORED`, `TRANSMITTING`, `SENT_TO_MESH`, `DELIVERED`, `WAITING`, `FAILED` ([algorithm design](../design/algorithm-design.md), section 9).
 - `next_hop`: only with `SENT_TO_MESH`. The `ack_from` of the ACK, as `0x` + 4 hex digits.
 
 The first `STATUS` after a `SEND` tells the app the new message's ID. After that the app only follows that ID and ignores lines about other messages still stored on the dongle.
@@ -70,6 +70,6 @@ INFO|78|2
 ```
 
 - `battery`: the dongle's battery percent 0–100, or `-`. The app currently ignores it and shows the phone's battery instead.
-- `nodes`: number of infra nodes heard in the last 3 minutes (the dongle's candidate list).
+- `nodes`: number of infra nodes heard in the last 3 HELLO intervals (the dongle's candidate list: 3 min in deployment, 30 s with the demo superframe).
 
 Send it in answer to `INFO?` and whenever the node count changes.

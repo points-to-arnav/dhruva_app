@@ -12,7 +12,7 @@ export const MESSAGE_STATES = [
   'FAILED',
 ];
 
-// DATA flags bitfield, packet_v2 section 3. "Medical help" is the Injured bit.
+// DATA flags bitfield, packet design section 3 (design/packet-design.md). "Medical help" is the Injured bit.
 export const FLAG_BITS = {
   Trapped: 0,
   'Medical help': 1,
