@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
-import { FAKE_STATUS_PROGRESS, FUNCTION_DELAY_XYZ } from '../config';
 import { useBattery } from '../hooks/useBattery';
 import { usePosition } from '../hooks/usePosition';
 import { createLink, encodeSend, INFO_REQUEST, parseLine } from '../serial';
@@ -9,14 +8,6 @@ import { SosContext } from './useSos';
 
 // Give a C3 that reset on port open a moment before asking for INFO.
 const INFO_DELAY_MS = 300;
-
-// Fake STATUS sequence (see FAKE_STATUS_PROGRESS): one step per random delay.
-const FAKE_STEPS = [{ state: 'STORED' }, { state: 'SENT_TO_MESH', nextHop: '0x0011' }, { state: 'DELIVERED' }];
-
-function fakeStepDelay() {
-  const { min, max } = FUNCTION_DELAY_XYZ;
-  return min + Math.random() * (max - min);
-}
 
 const emptyMessage = { id: null, state: null, nextHop: null, deliveredAt: null };
 
@@ -96,29 +87,6 @@ export function SosProvider({ children }) {
     latest.current = { state, position };
   });
 
-  const fakeProgress = FAKE_STATUS_PROGRESS && !link.mock;
-  const fakeTimers = useRef([]);
-  const fakeCount = useRef(41);
-  const stopFakeProgress = useCallback(() => {
-    fakeTimers.current.forEach(clearTimeout);
-    fakeTimers.current = [];
-  }, []);
-
-  // Walks the status screen through FAKE_STEPS as if the dongle had replied.
-  const startFakeProgress = useCallback(() => {
-    stopFakeProgress();
-    fakeCount.current += 1;
-    const messageId = `2001-${String(fakeCount.current).padStart(5, '0')}`;
-    let at = 0;
-    FAKE_STEPS.forEach(({ state: fakeState, nextHop = null }) => {
-      at += fakeStepDelay();
-      const event = { type: 'status', messageId, state: fakeState, nextHop };
-      fakeTimers.current.push(setTimeout(() => dispatch({ type: 'dongle', event }), at));
-    });
-  }, [stopFakeProgress]);
-
-  useEffect(() => stopFakeProgress, [stopFakeProgress]);
-
   useEffect(() => {
     let infoTimer;
     const unsubscribe = link.subscribe((event) => {
@@ -128,8 +96,7 @@ export function SosProvider({ children }) {
         return;
       }
       const parsed = parseLine(event.line);
-      // While faking, the dongle's own STATUS lines would fight the fake ones.
-      if (parsed && !(fakeProgress && parsed.type === 'status')) dispatch({ type: 'dongle', event: parsed });
+      if (parsed) dispatch({ type: 'dongle', event: parsed });
     });
     link.start();
     return () => {
@@ -137,7 +104,7 @@ export function SosProvider({ children }) {
       unsubscribe();
       link.stop();
     };
-  }, [link, fakeProgress]);
+  }, [link]);
 
   const connect = useCallback(() => {
     link.connect().catch((error) => {
@@ -150,16 +117,10 @@ export function SosProvider({ children }) {
     const { state: current, position: where } = latest.current;
     dispatch({ type: 'sendStarted' });
     const line = encodeSend({ people: current.people, needs: current.needs, position: where, time: new Date() });
-    stopFakeProgress();
-    link
-      .writeLine(line)
-      .then(() => {
-        if (fakeProgress) startFakeProgress();
-      })
-      .catch((error) => {
-        dispatch({ type: 'sendFailed', message: error?.message ?? String(error) });
-      });
-  }, [link, fakeProgress, startFakeProgress, stopFakeProgress]);
+    link.writeLine(line).catch((error) => {
+      dispatch({ type: 'sendFailed', message: error?.message ?? String(error) });
+    });
+  }, [link]);
 
   const value = useMemo(
     () => ({
@@ -173,14 +134,11 @@ export function SosProvider({ children }) {
       sendSos,
       toggleNeed: (need) => dispatch({ type: 'toggleNeed', need }),
       setPeople: (people) => dispatch({ type: 'setPeople', people }),
-      reset: () => {
-        stopFakeProgress();
-        dispatch({ type: 'reset' });
-      },
+      reset: () => dispatch({ type: 'reset' }),
       toggleMockConnection: () => link.mock?.toggleConnection(),
       toggleMockNodes: () => link.mock?.toggleNodes(),
     }),
-    [state, battery, location, link, connect, sendSos, stopFakeProgress],
+    [state, battery, location, link, connect, sendSos],
   );
 
   return <SosContext.Provider value={value}>{children}</SosContext.Provider>;

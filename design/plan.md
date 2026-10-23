@@ -262,7 +262,7 @@ Each milestone has a test that says it is done.
 | M4 | Home channels + DATA / ACK / retry | Pull B's antenna → A retries with backoff; two exchanges on different channels in the same pair both succeed |
 | M5 | Flash store + seen set | Reboot B → the message is still in B; a duplicate DATA gets an ACK but isn't stored again |
 | M6 | HELLO, neighbour table, geographic forwarding | A → B → C with no configured route: A picks B because B is closer to the Helper (C) |
-| M7 | DELIVERY, phone protocol on the dongle, Helper output | **Phone → dongle → Helper → laptop works, the app shows DELIVERED** (set `FAKE_STATUS_PROGRESS = false` in `src/config.js`); Act 1 passes 10 times in a row. **Demo ready.** |
+| M7 | DELIVERY, phone protocol on the dongle, Helper output | **Phone → dongle → Helper → laptop works, the app shows DELIVERED**; Act 1 passes 10 times in a row. **Demo ready.** |
 | M8 | Relay with GPS + range filter | Act 2 passes 10 times in a row; the relay's HELLO carries its GPS position once it has a fix |
 | M9 | Redundancy + failure testing | Diamond A–B–D–C (C = Helper): turn B off and the message still reaches C via D. Measure delivery rate, retry count, hops, duplicates, delivery time, lost messages under node failure, reboot, packet loss, moving nodes, simultaneous messages. |
 
