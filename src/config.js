@@ -9,5 +9,13 @@ export const DEMO_POSITION = {
   accuracy: 10, // metres
 };
 
+// TEMPORARY: until the firmware sends STATUS lines, the status screen fakes
+// its steps. Once the SEND line has gone out over USB, it moves to the next
+// step (saved, reached the network, delivered) after a random 2-3 s each,
+// and STATUS lines from the dongle are ignored. Set to false to follow the
+// dongle's real STATUS replies. Not used with ?mock, which simulates its own.
+export const FAKE_STATUS_PROGRESS = true;
+export const FAKE_STEP_DELAY_MS = { min: 2000, max: 3000 };
+
 // The ESP32-C3's built-in USB Serial/JTAG controller.
 export const DONGLE_USB_FILTER = { usbVendorId: 0x303a, usbProductId: 0x1001 };
