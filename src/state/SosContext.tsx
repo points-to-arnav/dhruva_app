@@ -1,10 +1,23 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
 
-import { buildSosPacket, createTransport, type DongleEvent, type DongleTransport } from '../serial';
-import { MockTransport } from '../serial/mockTransport';
+import { usePosition, type LocationStatus } from '../hooks/usePosition';
+import {
+  createLink,
+  encodeSend,
+  INFO_REQUEST,
+  parseLine,
+  type DongleEvent,
+  type MessageState,
+  type SerialLink,
+} from '../serial';
 import { clampPeople, type Need } from './sos';
 
-export type Phase = 'idle' | 'sending' | 'delivered';
+export type Message = {
+  id: string | null;
+  state: MessageState | null;
+  nextHop: string | null;
+  deliveredAt: Date | null;
+};
 
 type State = {
   connected: boolean;
@@ -12,15 +25,14 @@ type State = {
   nodesInRange: number | null;
   needs: Need[];
   people: number;
-  phase: Phase;
+  active: boolean;
   sentRequest: { needs: Need[]; people: number } | null;
-  requestId: string | null;
-  network: { via: string; hops: number } | null;
-  deliveredAt: Date | null;
+  message: Message;
   sendError: string | null;
 };
 
 type Action =
+  | { type: 'connection'; connected: boolean }
   | { type: 'dongle'; event: DongleEvent }
   | { type: 'toggleNeed'; need: Need }
   | { type: 'setPeople'; people: number }
@@ -28,39 +40,44 @@ type Action =
   | { type: 'sendFailed'; message: string }
   | { type: 'reset' };
 
+const emptyMessage: Message = { id: null, state: null, nextHop: null, deliveredAt: null };
+
 const initialState: State = {
   connected: false,
   battery: null,
   nodesInRange: null,
   needs: [],
   people: 1,
-  phase: 'idle',
+  active: false,
   sentRequest: null,
-  requestId: null,
-  network: null,
-  deliveredAt: null,
+  message: emptyMessage,
   sendError: null,
 };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
+    case 'connection':
+      return action.connected
+        ? { ...state, connected: true }
+        : { ...state, connected: false, battery: null, nodesInRange: null };
     case 'dongle': {
       const event = action.event;
-      switch (event.type) {
-        case 'connection':
-          return event.connected
-            ? { ...state, connected: true }
-            : { ...state, connected: false, battery: null, nodesInRange: null };
-        case 'status':
-          return { ...state, battery: event.battery, nodesInRange: event.nodesInRange };
-        case 'saved':
-          return { ...state, requestId: event.requestId };
-        case 'network':
-          return { ...state, network: { via: event.via, hops: event.hops } };
-        case 'delivered':
-          return { ...state, phase: 'delivered', deliveredAt: event.at };
+      if (event.type === 'info') {
+        return { ...state, battery: event.battery, nodesInRange: event.nodesInRange };
       }
-      return state;
+      // The first STATUS after a SEND names our message; later ones must match
+      // it. Others are older messages still stored on the dongle.
+      const { message } = state;
+      if (!state.active || (message.id !== null && message.id !== event.messageId)) return state;
+      return {
+        ...state,
+        message: {
+          id: event.messageId,
+          state: event.state,
+          nextHop: event.nextHop ?? message.nextHop,
+          deliveredAt: event.state === 'DELIVERED' ? (message.deliveredAt ?? new Date()) : message.deliveredAt,
+        },
+      };
     }
     case 'toggleNeed':
       return {
@@ -74,11 +91,9 @@ function reducer(state: State, action: Action): State {
     case 'sendStarted':
       return {
         ...state,
-        phase: 'sending',
+        active: true,
         sentRequest: { needs: state.needs, people: state.people },
-        requestId: null,
-        network: null,
-        deliveredAt: null,
+        message: emptyMessage,
         sendError: null,
       };
     case 'sendFailed':
@@ -94,55 +109,70 @@ function reducer(state: State, action: Action): State {
 }
 
 type SosContextValue = State & {
+  location: LocationStatus;
   isMock: boolean;
   toggleNeed: (need: Need) => void;
   setPeople: (people: number) => void;
   sendSos: () => void;
   reset: () => void;
   toggleMockConnection: () => void;
+  toggleMockNodes: () => void;
 };
 
 const SosContext = createContext<SosContextValue | null>(null);
 
 export function SosProvider({ children }: { children: ReactNode }) {
-  const transportRef = useRef<DongleTransport | null>(null);
-  if (!transportRef.current) transportRef.current = createTransport();
-  const transport = transportRef.current;
+  const linkRef = useRef<SerialLink | null>(null);
+  if (!linkRef.current) linkRef.current = createLink();
+  const link = linkRef.current;
 
   const [state, dispatch] = useReducer(reducer, initialState);
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  const { status: location, position } = usePosition();
+  const positionRef = useRef(position);
+  positionRef.current = position;
+
   useEffect(() => {
-    const unsubscribe = transport.subscribe((event) => dispatch({ type: 'dongle', event }));
-    transport.start();
+    const unsubscribe = link.subscribe((event) => {
+      if (event.type === 'connection') {
+        dispatch({ type: 'connection', connected: event.connected });
+        if (event.connected) link.writeLine(INFO_REQUEST).catch(() => {});
+        return;
+      }
+      const parsed = parseLine(event.line);
+      if (parsed) dispatch({ type: 'dongle', event: parsed });
+    });
+    link.start();
     return () => {
       unsubscribe();
-      transport.stop();
+      link.stop();
     };
-  }, [transport]);
+  }, [link]);
 
   const sendSos = useCallback(() => {
     const { needs, people } = stateRef.current;
     dispatch({ type: 'sendStarted' });
-    transport.send(buildSosPacket({ needs, people })).catch((error: unknown) => {
+    const line = encodeSend({ people, needs, position: positionRef.current, time: new Date() });
+    link.writeLine(line).catch((error: unknown) => {
       dispatch({ type: 'sendFailed', message: error instanceof Error ? error.message : String(error) });
     });
-  }, [transport]);
+  }, [link]);
 
   const value = useMemo<SosContextValue>(
     () => ({
       ...state,
-      isMock: transport.isMock,
+      location,
+      isMock: !!link.mock,
       toggleNeed: (need) => dispatch({ type: 'toggleNeed', need }),
       setPeople: (people) => dispatch({ type: 'setPeople', people }),
       sendSos,
       reset: () => dispatch({ type: 'reset' }),
-      toggleMockConnection: () => {
-        if (transport instanceof MockTransport) transport.toggleConnection();
-      },
+      toggleMockConnection: () => link.mock?.toggleConnection(),
+      toggleMockNodes: () => link.mock?.toggleNodes(),
     }),
-    [state, transport, sendSos],
+    [state, location, link, sendSos],
   );
 
   return <SosContext.Provider value={value}>{children}</SosContext.Provider>;

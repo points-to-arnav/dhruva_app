@@ -19,21 +19,26 @@ The real USB link needs a native module, so it needs a development build (`npx e
 | --- | --- |
 | `src/app/index.tsx` | Ready, Location not found, No dongle |
 | `src/app/countdown.tsx` | 5-second cancel window |
-| `src/app/status.tsx` | Sending (saved, reaching the network), Delivered |
+| `src/app/status.tsx` | Saving, Saved, Waiting for the network, Reached the network, Delivered, Failed |
 
 ## Mock dongle controls
 
 - **Long-press "Dongle connected"** to unplug or replug the mock dongle (shows the No dongle screen).
+- **Long-press "Battery 78%"** (any screen) to drop or restore the mesh nodes. With none, a sent SOS goes to WAITING and continues once the nodes are back (demo script steps 2 and 3).
 - **Long-press the SOS banner** (1 s) on the status screen to start over.
-- After you send, the mock reports *saved* at 0.5 s, *reached the network* at 3 s and *delivered* at 6.5 s.
+- After you send, the mock goes QUEUED, STORED, TRANSMITTING (1.5 s), SENT_TO_MESH via `0x0011` (3 s), then DELIVERED (6.5 s).
 
 ## Where things live
 
-- `src/serial/types.ts`: the `DongleTransport` interface and the events the dongle sends back.
-- `src/serial/mockTransport.ts`: the mock.
-- `src/serial/protocol.ts`: the SOS packet. **The live demo sends a preconfigured packet.** Replace `DEMO_SOS_PACKET` with the one from the packet design.
-- `src/serial/index.ts`: picks the transport. The USB CDC transport goes here.
-- `src/state/SosContext.tsx`: app state (dongle status, picks, SOS progress).
+- `docs/usb-protocol.md`: the phone ↔ dongle text protocol (`SEND`, `INFO?`, `STATUS`, `INFO`). The firmware has to speak it.
+- `src/serial/protocol.ts`: encodes `SEND` and parses dongle lines.
+- `src/serial/types.ts`: the `SerialLink` interface (a line-based serial port).
+- `src/serial/mockLink.ts`: a mock that behaves like the dongle firmware.
+- `src/serial/index.ts`: picks the link. The USB CDC link goes here.
+- `src/config.ts`: `DEMO_POSITION`, the preconfigured victim position for the live demo. Set it to `null` to use the phone's GPS.
+- `src/state/SosContext.tsx`: app state (dongle info, picks, message progress).
+
+The packet format is in packet_v2 (rev 4). Flags and people come from the screen; "Medical help" sets the Injured bit.
 
 ## Hardware notes
 

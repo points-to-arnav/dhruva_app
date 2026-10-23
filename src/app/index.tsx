@@ -5,23 +5,29 @@ import { DongleStatus } from '../components/DongleStatus';
 import { NeedChips } from '../components/NeedChips';
 import { PeopleStepper } from '../components/PeopleStepper';
 import { Screen } from '../components/Screen';
-import { useLocationStatus, type LocationStatus } from '../hooks/useLocationStatus';
 import { useSos } from '../state/SosContext';
 import { colors } from '../theme';
 
 export default function Home() {
   const { connected } = useSos();
-  const location = useLocationStatus();
 
-  return <Screen>{connected ? <Ready location={location.status} /> : <NoDongle />}</Screen>;
+  return <Screen>{connected ? <Ready /> : <NoDongle />}</Screen>;
 }
 
-function Ready({ location }: { location: LocationStatus }) {
-  const { nodesInRange, needs, people, toggleNeed, setPeople } = useSos();
+const LOCATION_TEXT = { demo: 'Demo location', found: 'Location found', searching: 'Finding location…', unavailable: null };
 
-  const nodes = nodesInRange === null ? null : nodesInRange === 1 ? '1 node in range' : `${nodesInRange} nodes in range`;
-  const locationText = location === 'found' ? 'Location found' : location === 'searching' ? 'Finding location…' : null;
-  const meta = [nodes, locationText].filter(Boolean).join(' · ');
+function Ready() {
+  const { nodesInRange, location, needs, people, toggleNeed, setPeople } = useSos();
+
+  const nodes =
+    nodesInRange === null
+      ? null
+      : nodesInRange === 0
+        ? 'No nodes in range'
+        : nodesInRange === 1
+          ? '1 node in range'
+          : `${nodesInRange} nodes in range`;
+  const meta = [nodes, LOCATION_TEXT[location]].filter(Boolean).join(' · ');
 
   return (
     <>

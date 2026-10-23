@@ -12,8 +12,13 @@ import { useSos } from '../state/SosContext';
 import { colors } from '../theme';
 
 export default function Status() {
-  const { phase, sentRequest, requestId, network, deliveredAt, sendError, isMock, sendSos, reset } = useSos();
-  const delivered = phase === 'delivered';
+  const { sentRequest, message, sendError, isMock, sendSos, reset } = useSos();
+  const { state } = message;
+  const saved = state !== null && state !== 'QUEUED';
+  const delivered = state === 'DELIVERED';
+  const failed = state === 'FAILED';
+  const waiting = state === 'WAITING';
+  const reached = delivered || state === 'SENT_TO_MESH' || message.nextHop !== null;
 
   // An active SOS has no way back; the dongle keeps it going.
   useEffect(() => {
@@ -29,20 +34,44 @@ export default function Status() {
   const steps: Step[] = [
     {
       title: 'Saved on your dongle',
-      detail: requestId ?? (sendError ? 'Not saved' : 'Saving…'),
-      state: requestId ? 'done' : 'active',
+      detail: saved && message.id ? message.id : sendError ? 'Not saved' : 'Saving…',
+      state: saved ? 'done' : 'active',
     },
-    {
-      title: network ? 'Reached the network' : 'Reaching the network',
-      detail: network ? `Via ${network.via} · ${network.hops} ${network.hops === 1 ? 'hop' : 'hops'}` : 'Looking for a nearby node',
-      state: network ? 'done' : requestId ? 'active' : 'pending',
-    },
+    reached
+      ? {
+          title: 'Reached the network',
+          detail: message.nextHop ? `Via ${message.nextHop}` : 'Handed to a nearby node',
+          state: 'done',
+        }
+      : {
+          title: 'Reaching the network',
+          detail: waiting
+            ? 'No node in range yet. Will keep trying.'
+            : state === 'TRANSMITTING'
+              ? 'Sending to a nearby node'
+              : 'Looking for a nearby node',
+          state: saved ? 'active' : 'pending',
+        },
     {
       title: delivered ? 'Rescue team received it' : 'Rescue team receives it',
-      detail: deliveredAt ? `Confirmed at ${formatTime(deliveredAt)}` : 'Not yet',
+      detail: message.deliveredAt ? `Confirmed at ${formatTime(message.deliveredAt)}` : failed ? 'Did not arrive' : 'Not yet',
       state: delivered ? 'done' : 'pending',
     },
   ];
+
+  const [heading, body] = delivered
+    ? ['Rescue team has your request', 'Stay where you are if it is safe, and keep the dongle on.']
+    : failed
+      ? ['Your SOS did not reach the rescue team', 'It ran out of hops on the way. Send it again to try another route.']
+      : waiting
+        ? [
+            'Saved, waiting for the network',
+            'No rescue node is in range yet. The dongle keeps your message and sends it as soon as one is. Move outside or higher if you can.',
+          ]
+        : [
+            saved ? 'Saved on your dongle' : 'Saving to your dongle',
+            'You do not need to press anything again. The dongle keeps trying until the network has it.',
+          ];
 
   return (
     <Screen>
@@ -56,21 +85,23 @@ export default function Status() {
           </View>
         ) : (
           <View style={[styles.banner, styles.bannerActive]}>
-            <Text style={[styles.bannerText, styles.bannerTextActive]}>SOS REQUEST ACTIVE</Text>
+            <Text style={[styles.bannerText, styles.bannerTextActive]}>
+              {failed ? 'SOS NOT DELIVERED' : 'SOS REQUEST ACTIVE'}
+            </Text>
           </View>
         )}
       </Pressable>
 
-      <Text style={styles.heading}>
-        {delivered ? 'Rescue team has your request' : requestId ? 'Saved on your dongle' : 'Saving to your dongle'}
-      </Text>
-      <Text style={styles.body}>
-        {delivered
-          ? 'Stay where you are if it is safe, and keep the dongle on.'
-          : 'You do not need to press anything again. The dongle keeps trying until the network has it.'}
-      </Text>
+      <Text style={styles.heading}>{heading}</Text>
+      <Text style={styles.body}>{body}</Text>
 
-      {sendError && !requestId ? (
+      {failed ? (
+        <Pressable onPress={sendSos} accessibilityRole="button" style={styles.retry}>
+          <Text style={styles.retryText}>Send again</Text>
+        </Pressable>
+      ) : null}
+
+      {sendError && !saved ? (
         <View style={styles.error} accessibilityRole="alert">
           <Text style={styles.errorTitle}>Could not reach the dongle</Text>
           <Text style={styles.errorBody}>{sendError}. Check the cable, then try again.</Text>

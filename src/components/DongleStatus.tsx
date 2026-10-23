@@ -4,7 +4,7 @@ import { useSos } from '../state/SosContext';
 import { colors } from '../theme';
 
 export function DongleStatus() {
-  const { connected, battery, isMock, toggleMockConnection } = useSos();
+  const { connected, battery, isMock, toggleMockConnection, toggleMockNodes } = useSos();
   const label = connected ? 'Dongle connected' : 'Dongle not connected';
 
   return (
@@ -18,7 +18,12 @@ export function DongleStatus() {
         <View style={[styles.dot, connected ? styles.dotOn : styles.dotOff]} />
         <Text style={styles.label}>{label}</Text>
       </Pressable>
-      {connected && battery !== null ? <Text style={styles.battery}>Battery {battery}%</Text> : null}
+      {connected && battery !== null ? (
+        // Mock only: long-press to drop or restore the mesh nodes (WAITING).
+        <Pressable onLongPress={isMock ? toggleMockNodes : undefined} accessibilityRole="text">
+          <Text style={styles.battery}>Battery {battery}%</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }

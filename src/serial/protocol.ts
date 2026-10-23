@@ -1,10 +1,79 @@
-import type { SosRequest } from '../state/sos';
+// Phone <-> dongle USB protocol: one '|'-separated text line per message,
+// ending in '\n'. Spec: docs/usb-protocol.md. The phone never builds LoRa
+// packets; the dongle turns SEND into a DATA packet.
+import type { Need } from '../state/sos';
+import type { DongleEvent } from './types';
 
-// PLACEHOLDER: replace with the preconfigured demo packet from the Hack-octo
-// packet design. The live demo sends this fixed payload whatever the user
-// picks; the picks only drive what the screens show.
-const DEMO_SOS_PACKET = 'DHRUVA_SOS_DEMO\n';
+export const MESSAGE_STATES = [
+  'QUEUED',
+  'STORED',
+  'TRANSMITTING',
+  'SENT_TO_MESH',
+  'DELIVERED',
+  'WAITING',
+  'FAILED',
+] as const;
+export type MessageState = (typeof MESSAGE_STATES)[number];
 
-export function buildSosPacket(_request: SosRequest): Uint8Array {
-  return new TextEncoder().encode(DEMO_SOS_PACKET);
+// DATA flags bitfield, packet_v2 section 3. "Medical help" is the Injured bit.
+export const FLAG_BITS: Record<Need, number> = {
+  Trapped: 0,
+  'Medical help': 1,
+  Fire: 2,
+  Flood: 3,
+  'Need water or food': 4,
+};
+
+// DATA position_acc: uint8 metres capped at 254, 0xFF = no fix.
+export const NO_FIX_ACCURACY = 255;
+const MAX_ACCURACY = 254;
+
+export type Position = {
+  latitude: number;
+  longitude: number;
+  altitude: number; // metres above sea level
+  accuracy: number | null; // metres
+};
+
+export type SendCommand = { people: number; needs: Need[]; position: Position | null; time: Date };
+
+export const INFO_REQUEST = 'INFO?';
+
+export function encodeFlags(needs: Need[]) {
+  const value = needs.reduce((bits, need) => bits | (1 << FLAG_BITS[need]), 0);
+  return `0x${value.toString(16).toUpperCase().padStart(2, '0')}`;
+}
+
+// SEND|people|flags|lat|lon|alt|acc|unix_time
+export function encodeSend({ people, needs, position, time }: SendCommand) {
+  const unix = Math.floor(time.getTime() / 1000);
+  const fields = position
+    ? [
+        position.latitude.toFixed(6),
+        position.longitude.toFixed(6),
+        Math.round(position.altitude),
+        position.accuracy === null ? MAX_ACCURACY : Math.min(MAX_ACCURACY, Math.max(0, Math.round(position.accuracy))),
+      ]
+    : ['0.000000', '0.000000', 0, NO_FIX_ACCURACY];
+  return ['SEND', people, encodeFlags(needs), ...fields, unix].join('|');
+}
+
+// Returns null for anything that isn't a protocol line (e.g. firmware logs
+// on the same port), so those are ignored.
+export function parseLine(raw: string): DongleEvent | null {
+  const parts = raw.trim().split('|');
+  switch (parts[0]) {
+    case 'STATUS': {
+      const [, messageId, state, nextHop] = parts;
+      if (!messageId || !MESSAGE_STATES.includes(state as MessageState)) return null;
+      return { type: 'status', messageId, state: state as MessageState, nextHop: nextHop || null };
+    }
+    case 'INFO': {
+      const battery = parseInt(parts[1], 10);
+      const nodes = parseInt(parts[2], 10);
+      if (Number.isNaN(nodes)) return null;
+      return { type: 'info', battery: Number.isNaN(battery) ? null : battery, nodesInRange: nodes };
+    }
+  }
+  return null;
 }

@@ -1,18 +1,18 @@
-// What the dongle (ESP32-C3 over USB CDC) reports back to the phone.
-export type DongleEvent =
-  | { type: 'connection'; connected: boolean }
-  | { type: 'status'; battery: number; nodesInRange: number }
-  | { type: 'saved'; requestId: string }
-  | { type: 'network'; via: string; hops: number }
-  | { type: 'delivered'; at: Date };
+import type { MessageState } from './protocol';
 
-export type DongleListener = (event: DongleEvent) => void;
+// Raw link to the dongle: a USB CDC serial port carrying text lines.
+export type LinkEvent = { type: 'connection'; connected: boolean } | { type: 'line'; line: string };
 
-// One implementation per link: the mock today, USB serial next.
-export interface DongleTransport {
-  readonly isMock: boolean;
+export interface SerialLink {
   start(): void;
   stop(): void;
-  subscribe(listener: DongleListener): () => void;
-  send(packet: Uint8Array): Promise<void>;
+  subscribe(listener: (event: LinkEvent) => void): () => void;
+  writeLine(line: string): Promise<void>;
+  // Only the mock has these: demo controls for unplugging things.
+  readonly mock?: { toggleConnection(): void; toggleNodes(): void };
 }
+
+// A parsed line from the dongle.
+export type DongleEvent =
+  | { type: 'info'; battery: number | null; nodesInRange: number }
+  | { type: 'status'; messageId: string; state: MessageState; nextHop: string | null };
