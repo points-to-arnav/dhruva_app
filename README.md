@@ -13,6 +13,15 @@ Check with `npm run typecheck` and `npm run lint`.
 
 Right now the app talks to a **mock dongle**, so it runs in Expo Go on any phone or emulator. Scan the QR code from `npx expo start`.
 
+### Installable APK (no PC or Wi-Fi needed)
+
+```bash
+npx eas-cli@latest login
+npx eas-cli@latest build -p android --profile preview
+```
+
+The build runs on Expo's servers and gives you a link and QR code to download the `.apk`. Install it on any Android phone (allow "install unknown apps"). Rebuild after code changes.
+
 The real USB link needs a native module, so it needs a development build (`npx expo run:android` or `eas build --profile development`), not Expo Go.
 
 ## Screens
